@@ -2,19 +2,18 @@ import * as core from "@actions/core";
 import * as exec from "@actions/exec";
 import * as glob from "@actions/glob";
 import * as io from "@actions/io";
-import * as crypto from "crypto";
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
-import { Readable } from "stream";
-import { pipeline } from "stream/promises";
-
 import {
     GetObjectCommand,
     ListObjectsV2Command,
     S3Client
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
+import * as crypto from "crypto";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 
 const bucketName = process.env["CACHE_S3_BUCKET"];
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
