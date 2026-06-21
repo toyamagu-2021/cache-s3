@@ -2,6 +2,7 @@ import * as cache from "@actions/cache";
 import * as core from "@actions/core";
 
 import { Events, Inputs, State } from "./constants";
+import * as s3Cache from "./s3/s3Cache";
 import {
     IStateProvider,
     NullStateProvider,
@@ -62,12 +63,17 @@ export async function saveImpl(
             Inputs.EnableCrossOsArchive
         );
 
-        cacheId = await cache.saveCache(
-            cachePaths,
-            primaryKey,
-            { uploadChunkSize: utils.getInputAsInt(Inputs.UploadChunkSize) },
-            enableCrossOsArchive
-        );
+        if (s3Cache.isS3Available()) {
+            await s3Cache.saveCache(cachePaths, primaryKey);
+            cacheId = 1;
+        } else {
+            cacheId = await cache.saveCache(
+                cachePaths,
+                primaryKey,
+                { uploadChunkSize: utils.getInputAsInt(Inputs.UploadChunkSize) },
+                enableCrossOsArchive
+            );
+        }
 
         if (cacheId != -1) {
             core.info(`Cache saved with key: ${primaryKey}`);

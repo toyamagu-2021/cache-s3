@@ -1,4 +1,25 @@
-# Cache action
+# Cache action (with S3 backend)
+
+This is a fork of [actions/cache](https://github.com/actions/cache) with an added S3 backend.
+When `CACHE_S3_BUCKET` is set, cache objects are stored in S3 instead of the GitHub cache service.
+If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub cache service.
+
+## S3 backend configuration
+
+| Environment variable      | Description                                         |
+|---------------------------|-----------------------------------------------------|
+| `CACHE_S3_BUCKET`         | S3 bucket name (required to enable S3 backend)      |
+| `AWS_REGION`              | AWS region                                          |
+| `CACHE_S3_ENDPOINT`       | Custom endpoint URL (e.g. for MinIO)                |
+| `CACHE_S3_FORCE_PATH_STYLE` | Set to `true` for path-style S3 URLs             |
+
+AWS credentials are resolved via the standard SDK credential chain (env vars, instance profile, etc.).
+
+## Acknowledgements
+
+The S3 backend implementation was inspired by [runs-on/cache](https://github.com/runs-on/cache).
+
+---
 
 This action allows caching dependencies and build outputs to improve workflow execution time.
 

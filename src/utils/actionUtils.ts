@@ -2,6 +2,7 @@ import * as cache from "@actions/cache";
 import * as core from "@actions/core";
 
 import { RefKey } from "../constants";
+import { isS3Available } from "../s3/s3Cache";
 
 export function isGhes(): boolean {
     const ghUrl = new URL(
@@ -67,6 +68,10 @@ export function getInputAsBool(
 }
 
 export function isCacheFeatureAvailable(): boolean {
+    if (isS3Available()) {
+        return true;
+    }
+
     if (cache.isFeatureAvailable()) {
         return true;
     }

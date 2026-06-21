@@ -2,6 +2,7 @@ import * as cache from "@actions/cache";
 import * as core from "@actions/core";
 
 import { Events, Inputs, Outputs, State } from "./constants";
+import * as s3Cache from "./s3/s3Cache";
 import {
     IStateProvider,
     NullStateProvider,
@@ -42,13 +43,15 @@ export async function restoreImpl(
         const failOnCacheMiss = utils.getInputAsBool(Inputs.FailOnCacheMiss);
         const lookupOnly = utils.getInputAsBool(Inputs.LookupOnly);
 
-        const cacheKey = await cache.restoreCache(
-            cachePaths,
-            primaryKey,
-            restoreKeys,
-            { lookupOnly: lookupOnly },
-            enableCrossOsArchive
-        );
+        const cacheKey = s3Cache.isS3Available()
+            ? await s3Cache.restoreCache(cachePaths, primaryKey, restoreKeys)
+            : await cache.restoreCache(
+                  cachePaths,
+                  primaryKey,
+                  restoreKeys,
+                  { lookupOnly: lookupOnly },
+                  enableCrossOsArchive
+              );
 
         if (!cacheKey) {
             // `cache-hit` is intentionally not set to `false` here to preserve existing behavior
