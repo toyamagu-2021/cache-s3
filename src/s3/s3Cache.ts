@@ -72,12 +72,17 @@ async function createArchive(
     await fs.promises.writeFile(manifestPath, resolvedPaths.join("\n") + "\n");
     try {
         if (compression === "zstd") {
-            await exec.exec("bash", [
-                "-c",
-                `tar -cf - -T '${manifestPath}' | zstd -T0 -o '${archivePath}'`
+            const tarPath = `${archivePath}.tar`;
+            await exec.exec("tar", ["-cf", tarPath, "-T", manifestPath]);
+            await exec.exec("zstd", [
+                "--rm",
+                "-T0",
+                tarPath,
+                "-o",
+                archivePath
             ]);
         } else {
-            await exec.exec("tar", ["-czf", archivePath, `-T`, manifestPath]);
+            await exec.exec("tar", ["-czf", archivePath, "-T", manifestPath]);
         }
     } finally {
         await fs.promises.unlink(manifestPath).catch(() => undefined);
@@ -89,10 +94,13 @@ async function extractArchive(
     compression: Compression
 ): Promise<void> {
     if (compression === "zstd") {
-        await exec.exec("bash", [
-            "-c",
-            `zstd -d '${archivePath}' --stdout | tar -xf - -C /`
-        ]);
+        const tarPath = `${archivePath}.tar`;
+        await exec.exec("zstd", ["-d", archivePath, "-o", tarPath]);
+        try {
+            await exec.exec("tar", ["-xf", tarPath, "-C", "/"]);
+        } finally {
+            await fs.promises.unlink(tarPath).catch(() => undefined);
+        }
     } else {
         await exec.exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
