@@ -24,8 +24,8 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           run_install: false
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install production dependencies only
+        run: pnpm install --prod --ignore-scripts
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -39,6 +39,11 @@ jobs:
           tar -xzf licensed.tar.gz
           cd licensed-5.0.4
           bundle install
+
+      - name: Update cached dependency records
+        run: |
+          cd ${{ github.workspace }}
+          BUNDLE_GEMFILE=$RUNNER_TEMP/licensed-5.0.4/Gemfile bundle exec $RUNNER_TEMP/licensed-5.0.4/exe/licensed cache
 
       - name: Check cached dependency records
         run: |
