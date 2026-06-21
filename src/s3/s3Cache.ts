@@ -174,10 +174,7 @@ export async function restoreCache(
     }
 }
 
-export async function saveCache(
-    paths: string[],
-    key: string
-): Promise<void> {
+export async function saveCache(paths: string[], key: string): Promise<void> {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
