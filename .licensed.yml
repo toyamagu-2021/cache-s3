@@ -32,3 +32,6 @@ reviewed:
   - lodash # MIT
   - "@actions/http-client" # MIT
   - "@actions/glob" # MIT
+  - ieee754 # BSD-3-Clause (license file format not auto-detected)
+  - readable-stream # MIT (license file format not auto-detected)
+  - string_decoder # MIT (license file format not auto-detected)
