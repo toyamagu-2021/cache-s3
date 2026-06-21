@@ -7,9 +7,9 @@
   "scripts": {
     "build": "tsc && ncc build -o dist/restore src/restore.ts && ncc build -o dist/save src/save.ts && ncc build -o dist/restore-only src/restoreOnly.ts && ncc build -o dist/save-only src/saveOnly.ts",
     "test": "tsc --noEmit && jest --coverage",
-    "lint": "eslint **/*.ts --cache",
-    "format": "prettier --write **/*.ts",
-    "format-check": "prettier --check **/*.ts"
+    "lint": "eslint \"**/*.ts\" --cache",
+    "format": "prettier --write \"**/*.ts\"",
+    "format-check": "prettier --check \"**/*.ts\""
   },
   "repository": {
     "type": "git",
@@ -22,11 +22,15 @@
   ],
   "author": "GitHub",
   "license": "MIT",
+  "packageManager": "pnpm@11.8.0",
   "dependencies": {
     "@actions/cache": "^5.0.5",
     "@actions/core": "^2.0.3",
     "@actions/exec": "^2.0.0",
-    "@actions/io": "^2.0.0"
+    "@actions/glob": "^0.5.0",
+    "@actions/io": "^2.0.0",
+    "@aws-sdk/client-s3": "^3.511.0",
+    "@aws-sdk/lib-storage": "^3.513.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

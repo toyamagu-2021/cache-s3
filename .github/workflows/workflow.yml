@@ -28,14 +28,16 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: 24.x
-        cache: npm
-    - run: npm ci
+    - uses: pnpm/action-setup@v4
+      with:
+        run_install: false
+    - run: pnpm install --frozen-lockfile
     - name: Prettier Format Check
-      run: npm run format-check
+      run: pnpm format-check
     - name: ESLint Check
-      run: npm run lint
+      run: pnpm lint
     - name: Build & Test
-      run: npm run test
+      run: pnpm test
 
   # End to end save and restore
   test-save:
