@@ -21,11 +21,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
         with:
-          run_install: false
+          node-version: "24.x"
       - name: Install production dependencies only
-        run: pnpm install --prod --ignore-scripts
+        run: npm install --omit=dev --omit=optional --ignore-scripts
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
