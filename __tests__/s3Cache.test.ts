@@ -1,23 +1,38 @@
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    jest,
+    test
+} from "@jest/globals";
 import * as fs from "fs";
 import { Readable } from "stream";
 
-const mockExec = jest.fn();
-const mockWhich = jest.fn();
-const mockGlobCreate = jest.fn();
-const mockSend = jest.fn();
-const mockUploadDone = jest.fn();
+const mockExec = jest.fn<(tool: string, args?: string[]) => Promise<number>>();
+const mockWhich = jest.fn<(tool: string, check?: boolean) => Promise<string>>();
+const mockGlobCreate =
+    jest.fn<
+        (
+            pattern: string,
+            options?: Record<string, unknown>
+        ) => Promise<{ glob: () => Promise<string[]> }>
+    >();
+const mockSend =
+    jest.fn<(command: { input: Record<string, string> }) => Promise<unknown>>();
+const mockUploadDone = jest.fn<() => Promise<void>>();
 
-jest.mock("@actions/exec", () => ({ exec: mockExec }));
-jest.mock("@actions/io", () => ({ which: mockWhich }));
-jest.mock("@actions/glob", () => ({ create: mockGlobCreate }));
+jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
+jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
+jest.unstable_mockModule("@actions/glob", () => ({ create: mockGlobCreate }));
 
-jest.mock("@aws-sdk/client-s3", () => ({
+jest.unstable_mockModule("@aws-sdk/client-s3", () => ({
     S3Client: jest.fn(() => ({ send: mockSend })),
     ListObjectsV2Command: jest.fn(input => ({ input })),
     GetObjectCommand: jest.fn(input => ({ input }))
 }));
 
-jest.mock("@aws-sdk/lib-storage", () => ({
+jest.unstable_mockModule("@aws-sdk/lib-storage", () => ({
     Upload: jest.fn(() => ({ done: mockUploadDone }))
 }));
 
@@ -25,12 +40,9 @@ type S3CacheModule = typeof import("../src/s3/s3Cache");
 
 // bucketName and the S3 client are captured at module load, so the module has
 // to be evaluated after the env vars are in place.
-function loadS3Cache(): S3CacheModule {
-    let s3Cache: S3CacheModule | undefined;
-    jest.isolateModules(() => {
-        s3Cache = jest.requireActual<S3CacheModule>("../src/s3/s3Cache");
-    });
-    return s3Cache as S3CacheModule;
+async function loadS3Cache(): Promise<S3CacheModule> {
+    jest.resetModules();
+    return await import("../src/s3/s3Cache");
 }
 
 function mockAvailableTools(...tools: string[]): void {
@@ -45,7 +57,7 @@ function mockAvailableTools(...tools: string[]): void {
 function tarArgs(): string[] {
     expect(mockExec).toHaveBeenCalledTimes(1);
     expect(mockExec.mock.calls[0][0]).toBe("tar");
-    return mockExec.mock.calls[0][1];
+    return mockExec.mock.calls[0][1] as string[];
 }
 
 beforeEach(() => {
@@ -79,7 +91,7 @@ afterEach(() => {
 
 describe("saveCache", () => {
     test("hands directories to tar instead of expanding them into descendants", async () => {
-        await loadS3Cache().saveCache(["/tmp/cached-dir"], "key");
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "key");
 
         expect(mockGlobCreate).toHaveBeenCalledWith("/tmp/cached-dir", {
             implicitDescendants: false
@@ -89,7 +101,7 @@ describe("saveCache", () => {
     test("compresses with a single-pass tar pipeline when zstd is available", async () => {
         mockAvailableTools("zstd", "unzstd");
 
-        await loadS3Cache().saveCache(["/tmp/cached-dir"], "key");
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "key");
 
         const args = tarArgs();
         expect(args.slice(0, 3)).toEqual([
@@ -102,7 +114,7 @@ describe("saveCache", () => {
     });
 
     test("compresses in one pass with gzip when zstd is unavailable", async () => {
-        await loadS3Cache().saveCache(["/tmp/cached-dir"], "key");
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "key");
 
         const args = tarArgs();
         expect(args[0]).toBe("-czf");
@@ -133,10 +145,9 @@ describe("restoreCache", () => {
     test("extracts with a single-pass tar pipeline when zstd is available", async () => {
         mockAvailableTools("zstd", "unzstd");
 
-        const key = await loadS3Cache().restoreCache(
-            ["/tmp/cached-dir"],
-            "key"
-        );
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
 
         expect(key).toBe("key");
         expect(tarArgs()).toEqual([
@@ -152,10 +163,9 @@ describe("restoreCache", () => {
     test("falls back to `zstd -d` when unzstd is not on PATH", async () => {
         mockAvailableTools("zstd");
 
-        const key = await loadS3Cache().restoreCache(
-            ["/tmp/cached-dir"],
-            "key"
-        );
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
 
         expect(key).toBe("key");
         expect(tarArgs().slice(0, 2)).toEqual([
@@ -165,10 +175,9 @@ describe("restoreCache", () => {
     });
 
     test("extracts in one pass with gzip when zstd is unavailable", async () => {
-        const key = await loadS3Cache().restoreCache(
-            ["/tmp/cached-dir"],
-            "key"
-        );
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
 
         expect(key).toBe("key");
         expect(tarArgs()).toEqual([

@@ -35,3 +35,6 @@ reviewed:
   - ieee754 # BSD-3-Clause (license file format not auto-detected)
   - readable-stream # MIT (license file format not auto-detected)
   - string_decoder # MIT (license file format not auto-detected)
+  - balanced-match # MIT (v4 LICENSE.md carries a dual copyright header, so it is not auto-detected)
+  - brace-expansion # MIT (v5 LICENSE carries a dual copyright header, so it is not auto-detected)
+  - minimatch # BlueOak-1.0.0 as of v10, permissive and OSI-approved
