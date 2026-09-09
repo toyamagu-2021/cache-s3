@@ -45,7 +45,7 @@ requires Actions Runner 2.327.1 or later, same as upstream `v6`. Minor and patch
 this fork's own sequence and do not correspond to any upstream release. `v6` is a floating tag
 that follows the latest `v6.x` release of this fork.
 
-Pin by commit SHA (`toyamagu-2021/cache-s3@<sha> # v6.2.0`) to make the action contents
+Pin by commit SHA (`toyamagu-2021/cache-s3@<sha> # v6.0.0`) to make the action contents
 immutable.
 
 ## Acknowledgements

@@ -29,26 +29,24 @@ the code this fork builds on.
 
     ```bash
     git fetch origin --tags
-    git tag -f v6 v6.2.0
+    git tag -f v6 v6.0.0
     git push -f origin v6
     ```
 
 ## Changelog
 
-### 6.2.0
+### 6.0.0 (this fork)
 
 - Merged upstream `actions/cache` v6.1.0: `@actions/cache` v6.2.0, `@actions/core` v3.0.1,
   `@actions/exec` v3.0.0, `@actions/io` v3.0.2, and the ESM migration of the sources, the
   test suite, and the `dist/` bundles.
-- Numbering starts at 6.2.0 so every fork release stays above the upstream patch numbers
-  already published under `v6`.
 
-### 6.1.0
+### 6.1.0 (upstream)
 
 - Bump `@actions/cache` to v6.1.0 to pick up [actions/toolkit#2435 Handle cache write error due to read-only token](https://github.com/actions/toolkit/pull/2435)
 - Switch redundant "Cache save failed" warning to debug log in save-only
 
-### 6.0.0
+### 6.0.0 (upstream)
 
 - Updated `@actions/cache` to ^6.0.1, `@actions/core` to ^3.0.1, `@actions/exec` to ^3.0.0, `@actions/io` to ^3.0.2
 - Migrated to ESM module system
