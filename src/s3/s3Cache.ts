@@ -44,7 +44,7 @@ async function getCompression(): Promise<Compression> {
 function cacheVersion(paths: string[], compression: Compression): string {
     return crypto
         .createHash("sha256")
-        .update([...paths, compression, "1.0"].join("|"))
+        .update([...paths, compression, "1.1"].join("|"))
         .digest("hex");
 }
 
@@ -59,7 +59,13 @@ async function createTempDir(): Promise<string> {
 }
 
 async function resolvePaths(patterns: string[]): Promise<string[]> {
-    const globber = await glob.create(patterns.join("\n"));
+    // implicitDescendants expands a directory into every descendant path. tar
+    // then re-recurses each of those directories, duplicating subtrees, and a
+    // symlink farm (pnpm) is both collected twice and materialized as real
+    // directories on extract.
+    const globber = await glob.create(patterns.join("\n"), {
+        implicitDescendants: false
+    });
     return globber.glob();
 }
 
