@@ -77915,7 +77915,7 @@ function getCompression() {
 function cacheVersion(paths, compression) {
     return crypto
         .createHash("sha256")
-        .update([...paths, compression, "1.0"].join("|"))
+        .update([...paths, compression, "1.1"].join("|"))
         .digest("hex");
 }
 function s3Prefix(paths, compression) {
@@ -77930,7 +77930,13 @@ function createTempDir() {
 }
 function resolvePaths(patterns) {
     return __awaiter(this, void 0, void 0, function* () {
-        const globber = yield glob.create(patterns.join("\n"));
+        // implicitDescendants expands a directory into every descendant path. tar
+        // then re-recurses each of those directories, duplicating subtrees, and a
+        // symlink farm (pnpm) is both collected twice and materialized as real
+        // directories on extract.
+        const globber = yield glob.create(patterns.join("\n"), {
+            implicitDescendants: false
+        });
         return globber.glob();
     });
 }
