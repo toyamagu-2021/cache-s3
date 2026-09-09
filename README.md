@@ -24,6 +24,30 @@ The compression method is part of the cache version, so installing `zstd` on a r
 previously had only `gzip` invalidates every existing entry for that runner. GitHub's own cache
 service behaves the same way.
 
+## Usage
+
+```yaml
+- uses: toyamagu-2021/cache-s3@v5
+  env:
+    CACHE_S3_BUCKET: my-cache-bucket
+    AWS_REGION: ap-northeast-1
+  with:
+    path: ~/.cache/pnpm
+    key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+```
+
+Inputs and outputs are identical to the upstream action, documented below.
+
+## Versioning
+
+The major version tracks upstream `actions/cache`: `v5` runs on the Node 24 runtime and
+requires Actions Runner 2.327.1 or later, same as upstream `v5`. Minor and patch numbers are
+this fork's own sequence and do not correspond to any upstream release. `v5` is a floating tag
+that follows the latest `v5.x` release of this fork.
+
+Pin by commit SHA (`toyamagu-2021/cache-s3@<sha> # v5.1.0`) to make the action contents
+immutable.
+
 ## Acknowledgements
 
 The S3 backend implementation was inspired by [runs-on/cache](https://github.com/runs-on/cache).
@@ -37,7 +61,7 @@ This action allows caching dependencies and build outputs to improve workflow ex
 >* [Restore action](./restore/README.md)
 >* [Save action](./save/README.md)
 
-[![Tests](https://github.com/actions/cache/actions/workflows/workflow.yml/badge.svg)](https://github.com/actions/cache/actions/workflows/workflow.yml)
+[![Tests](https://github.com/toyamagu-2021/cache-s3/actions/workflows/workflow.yml/badge.svg)](https://github.com/toyamagu-2021/cache-s3/actions/workflows/workflow.yml)
 
 ## Documentation
 
