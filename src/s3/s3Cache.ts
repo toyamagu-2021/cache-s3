@@ -69,6 +69,18 @@ async function resolvePaths(patterns: string[]): Promise<string[]> {
     return globber.glob();
 }
 
+async function zstdDecompressProgram(): Promise<string> {
+    // zstd is sometimes installed without the unzstd symlink. "zstd -d" is an
+    // equivalent filter, and the extra -d that GNU tar appends when extracting
+    // is harmless.
+    try {
+        await io.which("unzstd", true);
+        return "unzstd";
+    } catch {
+        return "zstd -d";
+    }
+}
+
 async function createArchive(
     archivePath: string,
     resolvedPaths: string[],
@@ -78,14 +90,13 @@ async function createArchive(
     await fs.promises.writeFile(manifestPath, resolvedPaths.join("\n") + "\n");
     try {
         if (compression === "zstd") {
-            const tarPath = `${archivePath}.tar`;
-            await exec.exec("tar", ["-cf", tarPath, "-T", manifestPath]);
-            await exec.exec("zstd", [
-                "--rm",
-                "-T0",
-                tarPath,
-                "-o",
-                archivePath
+            await exec.exec("tar", [
+                "--use-compress-program",
+                "zstd -T0",
+                "-cf",
+                archivePath,
+                "-T",
+                manifestPath
             ]);
         } else {
             await exec.exec("tar", ["-czf", archivePath, "-T", manifestPath]);
@@ -100,13 +111,14 @@ async function extractArchive(
     compression: Compression
 ): Promise<void> {
     if (compression === "zstd") {
-        const tarPath = `${archivePath}.tar`;
-        await exec.exec("zstd", ["-d", archivePath, "-o", tarPath]);
-        try {
-            await exec.exec("tar", ["-xf", tarPath, "-C", "/"]);
-        } finally {
-            await fs.promises.unlink(tarPath).catch(() => undefined);
-        }
+        await exec.exec("tar", [
+            "--use-compress-program",
+            await zstdDecompressProgram(),
+            "-xf",
+            archivePath,
+            "-C",
+            "/"
+        ]);
     } else {
         await exec.exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }

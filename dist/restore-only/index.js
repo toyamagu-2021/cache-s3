@@ -78080,20 +78080,33 @@ function resolvePaths(patterns) {
         return globber.glob();
     });
 }
+function zstdDecompressProgram() {
+    return __awaiter(this, void 0, void 0, function* () {
+        // zstd is sometimes installed without the unzstd symlink. "zstd -d" is an
+        // equivalent filter, and the extra -d that GNU tar appends when extracting
+        // is harmless.
+        try {
+            yield io.which("unzstd", true);
+            return "unzstd";
+        }
+        catch (_a) {
+            return "zstd -d";
+        }
+    });
+}
 function createArchive(archivePath, resolvedPaths, compression) {
     return __awaiter(this, void 0, void 0, function* () {
         const manifestPath = `${archivePath}.manifest`;
         yield fs.promises.writeFile(manifestPath, resolvedPaths.join("\n") + "\n");
         try {
             if (compression === "zstd") {
-                const tarPath = `${archivePath}.tar`;
-                yield exec.exec("tar", ["-cf", tarPath, "-T", manifestPath]);
-                yield exec.exec("zstd", [
-                    "--rm",
-                    "-T0",
-                    tarPath,
-                    "-o",
-                    archivePath
+                yield exec.exec("tar", [
+                    "--use-compress-program",
+                    "zstd -T0",
+                    "-cf",
+                    archivePath,
+                    "-T",
+                    manifestPath
                 ]);
             }
             else {
@@ -78108,14 +78121,14 @@ function createArchive(archivePath, resolvedPaths, compression) {
 function extractArchive(archivePath, compression) {
     return __awaiter(this, void 0, void 0, function* () {
         if (compression === "zstd") {
-            const tarPath = `${archivePath}.tar`;
-            yield exec.exec("zstd", ["-d", archivePath, "-o", tarPath]);
-            try {
-                yield exec.exec("tar", ["-xf", tarPath, "-C", "/"]);
-            }
-            finally {
-                yield fs.promises.unlink(tarPath).catch(() => undefined);
-            }
+            yield exec.exec("tar", [
+                "--use-compress-program",
+                yield zstdDecompressProgram(),
+                "-xf",
+                archivePath,
+                "-C",
+                "/"
+            ]);
         }
         else {
             yield exec.exec("tar", ["-xzf", archivePath, "-C", "/"]);

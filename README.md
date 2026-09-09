@@ -15,6 +15,15 @@ If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub ca
 
 AWS credentials are resolved via the standard SDK credential chain (env vars, instance profile, etc.).
 
+### Compression
+
+`zstd` is used when it is available on the runner, otherwise `gzip`. Both are driven as a single
+streaming `tar` pipeline, so the archive is written and read exactly once.
+
+The compression method is part of the cache version, so installing `zstd` on a runner that
+previously had only `gzip` invalidates every existing entry for that runner. GitHub's own cache
+service behaves the same way.
+
 ## Acknowledgements
 
 The S3 backend implementation was inspired by [runs-on/cache](https://github.com/runs-on/cache).
