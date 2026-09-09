@@ -1,0 +1,5 @@
+# Both packages ship optional native binaries; the prebuilt artifacts they fall
+# back to are enough for linting, so their install scripts stay unexecuted.
+allowBuilds:
+  '@parcel/watcher': false
+  unrs-resolver: false

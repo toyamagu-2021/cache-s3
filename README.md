@@ -27,7 +27,7 @@ service behaves the same way.
 ## Usage
 
 ```yaml
-- uses: toyamagu-2021/cache-s3@v5
+- uses: toyamagu-2021/cache-s3@v6
   env:
     CACHE_S3_BUCKET: my-cache-bucket
     AWS_REGION: ap-northeast-1
@@ -40,12 +40,12 @@ Inputs and outputs are identical to the upstream action, documented below.
 
 ## Versioning
 
-The major version tracks upstream `actions/cache`: `v5` runs on the Node 24 runtime and
-requires Actions Runner 2.327.1 or later, same as upstream `v5`. Minor and patch numbers are
-this fork's own sequence and do not correspond to any upstream release. `v5` is a floating tag
-that follows the latest `v5.x` release of this fork.
+The major version tracks upstream `actions/cache`: `v6` runs on the Node 24 runtime and
+requires Actions Runner 2.327.1 or later, same as upstream `v6`. Minor and patch numbers are
+this fork's own sequence and do not correspond to any upstream release. `v6` is a floating tag
+that follows the latest `v6.x` release of this fork.
 
-Pin by commit SHA (`toyamagu-2021/cache-s3@<sha> # v5.1.0`) to make the action contents
+Pin by commit SHA (`toyamagu-2021/cache-s3@<sha> # v6.2.0`) to make the action contents
 immutable.
 
 ## Acknowledgements
@@ -87,10 +87,15 @@ If you do not upgrade, all workflow runs using any of the deprecated [actions/ca
 
 Upgrading to the recommended versions will not break your workflows.
 
-> **Additionally, if you are managing your own GitHub runners, you must update your runner version to `2.231.0` or newer to ensure compatibility with the new cache service.**  
+> **Additionally, if you are managing your own GitHub runners, you must update your runner version to `2.231.0` or newer to ensure compatibility with the new cache service.**
 > Failure to update both the action version and your runner version may result in workflow failures after the migration date.
 
 Read more about the change & access the migration guide: [reference to the announcement](https://github.com/actions/cache/discussions/1510).
+
+### v6
+
+* Updated `@actions/cache`, `@actions/core`, `@actions/exec` to latest major versions
+* Migrated to ESM module system
 
 ### v5
 
@@ -163,6 +168,14 @@ The cache is scoped to the key, [version](#cache-version), and branch. The defau
 
 See [Matching a cache key](https://help.github.com/en/actions/configuring-and-managing-workflows/caching-dependencies-to-speed-up-workflows#matching-a-cache-key) for more info.
 
+### Read-only access
+
+Some workflow runs only have read-only access to the cache. A common case is a workflow triggered by a pull request from a fork: such runs can **restore** existing caches but may not be permitted to **save** new ones.
+
+When the cache token is read-only, the save step does not fail the job. Instead, `@actions/cache` reports the denial once as a warning (for example, `Failed to save: ... cache write denied: ...`) and the step completes successfully without writing a cache entry. Restores in the same run continue to work as usual.
+
+> **Note** This applies to the action's normal save path as well as the standalone [Save action](./save/README.md). If you intentionally want a restore-only setup, see [Make cache read only / Reuse cache from centralized job](./caching-strategies.md#make-cache-read-only--reuse-cache-from-centralized-job).
+
 ### Example cache workflow
 
 #### Restoring and saving cache using a single action
@@ -181,7 +194,7 @@ jobs:
 
     - name: Cache Primes
       id: cache-primes
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: prime-numbers
         key: ${{ runner.os }}-primes
@@ -212,7 +225,7 @@ jobs:
 
     - name: Restore cached Primes
       id: cache-primes-restore
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@v6
       with:
         path: |
           path/to/dependencies
@@ -223,7 +236,7 @@ jobs:
     .
     - name: Save Primes
       id: cache-primes-save
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@v6
       with:
         path: |
           path/to/dependencies
@@ -278,7 +291,7 @@ A cache key can include any of the contexts, functions, literals, and operators 
 For example, using the [`hashFiles`](https://docs.github.com/en/actions/learn-github-actions/expressions#hashfiles) function allows you to create a new cache when dependencies change.
 
 ```yaml
-  - uses: actions/cache@v5
+  - uses: actions/cache@v6
     with:
       path: |
         path/to/dependencies
@@ -296,7 +309,7 @@ Additionally, you can use arbitrary command output in a cache key, such as a dat
       echo "date=$(/bin/date -u "+%Y%m%d")" >> $GITHUB_OUTPUT
     shell: bash
 
-  - uses: actions/cache@v5
+  - uses: actions/cache@v6
     with:
       path: path/to/dependencies
       key: ${{ runner.os }}-${{ steps.get-date.outputs.date }}-${{ hashFiles('**/lockfiles') }}
@@ -318,7 +331,7 @@ Example:
 steps:
   - uses: actions/checkout@v6
 
-  - uses: actions/cache@v5
+  - uses: actions/cache@v6
     id: cache
     with:
       path: path/to/dependencies
@@ -350,7 +363,7 @@ jobs:
 
       - name: Cache Primes
         id: cache-primes
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: prime-numbers
           key: primes
@@ -361,7 +374,7 @@ jobs:
 
       - name: Cache Numbers
         id: cache-numbers
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: numbers
           key: primes
@@ -377,7 +390,7 @@ jobs:
 
       - name: Cache Primes
         id: cache-primes
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: prime-numbers
           key: primes
@@ -405,7 +418,7 @@ Please note that Windows environment variables (like `%LocalAppData%`) will NOT 
 
 ## Note
 
-Thank you for your interest in this GitHub repo, however, right now we are not taking contributions. 
+Thank you for your interest in this GitHub repo, however, right now we are not taking contributions.
 
 We continue to focus our resources on strategic areas that help our customers be successful while making developers' lives easier. While GitHub Actions remains a key part of this vision, we are allocating resources towards other areas of Actions and are not taking contributions to this repository at this time. The GitHub public roadmap is the best place to follow along for any updates on features we’re working on and what stage they’re in.
 
