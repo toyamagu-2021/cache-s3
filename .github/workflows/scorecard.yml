@@ -1,0 +1,46 @@
+name: Scorecard
+
+on:
+  # Branch-Protection only evaluates the default branch.
+  # https://github.com/ossf/scorecard/blob/main/docs/checks.md#branch-protection
+  branch_protection_rule:
+  schedule:
+    # Weekly, so the Maintained check does not go stale.
+    - cron: "0 6 * * 1"
+  push:
+    branches: [main]
+
+permissions: {}
+
+# Do not read or write the Actions cache from this workflow.
+cache-mode: none
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    if: github.event.repository.default_branch == github.ref_name
+    permissions:
+      contents: read
+      # Sign results published to the OpenSSF Scorecard API.
+      id-token: write
+      # Upload the SARIF report to code scanning.
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5 # v2.6.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: results.sarif

@@ -61,6 +61,7 @@ This action allows caching dependencies and build outputs to improve workflow ex
 >* [Restore action](./restore/README.md)
 >* [Save action](./save/README.md)
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/toyamagu-2021/cache-s3/badge)](https://scorecard.dev/viewer/?uri=github.com/toyamagu-2021/cache-s3)
 [![Tests](https://github.com/toyamagu-2021/cache-s3/actions/workflows/workflow.yml/badge.svg)](https://github.com/toyamagu-2021/cache-s3/actions/workflows/workflow.yml)
 
 ## Documentation
