@@ -12,7 +12,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { Readable } from "stream";
+import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
 
 const DEFAULT_QUEUE_SIZE = 4;
@@ -42,6 +42,71 @@ export function unsetAmbientAwsCredentials(env: NodeJS.ProcessEnv): void {
         delete env["AWS_ACCESS_KEY_ID"];
         delete env["AWS_SECRET_ACCESS_KEY"];
         delete env["AWS_SESSION_TOKEN"];
+    }
+}
+
+export class DownloadProgress {
+    readonly totalBytes: number;
+    private transferred = 0;
+    private startTime = Date.now();
+    private timer: ReturnType<typeof setInterval> | undefined;
+    private lastDisplayedBytes = -1;
+
+    constructor(totalBytes: number) {
+        this.totalBytes = totalBytes;
+    }
+
+    addBytes(bytes: number): void {
+        if (bytes > 0) {
+            this.transferred += bytes;
+        }
+    }
+
+    start(intervalMs = 1000): void {
+        this.startTime = Date.now();
+        this.stopTimer();
+        this.timer = setInterval(() => this.display(), intervalMs);
+        this.timer.unref?.();
+    }
+
+    display(): void {
+        const elapsedSeconds = Math.max(
+            (Date.now() - this.startTime) / 1000,
+            0.001
+        );
+        const speedMBs = (
+            this.transferred /
+            (1024 * 1024) /
+            elapsedSeconds
+        ).toFixed(1);
+        const pct =
+            this.totalBytes > 0
+                ? Math.min(
+                      100,
+                      (this.transferred / this.totalBytes) * 100
+                  ).toFixed(1)
+                : "0.0";
+        core.info(
+            `Received ${this.transferred} of ${this.totalBytes} (${pct}%), ${speedMBs} MB/s`
+        );
+        this.lastDisplayedBytes = this.transferred;
+    }
+
+    stop(): void {
+        this.stopTimer();
+        if (
+            this.transferred > 0 &&
+            this.lastDisplayedBytes !== this.transferred
+        ) {
+            this.display();
+        }
+    }
+
+    private stopTimer(): void {
+        if (this.timer !== undefined) {
+            clearInterval(this.timer);
+            this.timer = undefined;
+        }
     }
 }
 
@@ -311,11 +376,26 @@ async function downloadSingleWithRetry(
                 if (!Body) {
                     throw new Error("Empty response body from S3");
                 }
-                await pipeline(
-                    Body as Readable,
-                    fs.createWriteStream(archivePath),
-                    { signal: controller.signal }
+                const progress = new DownloadProgress(
+                    expectedSize ?? ContentLength ?? 0
                 );
+                progress.start();
+                try {
+                    const progressStream = new Transform({
+                        transform(chunk, _encoding, callback) {
+                            progress.addBytes(Buffer.byteLength(chunk));
+                            callback(null, chunk);
+                        }
+                    });
+                    await pipeline(
+                        Body as Readable,
+                        progressStream,
+                        fs.createWriteStream(archivePath),
+                        { signal: controller.signal }
+                    );
+                } finally {
+                    progress.stop();
+                }
 
                 const downloadedSize = fs.statSync(archivePath).size;
                 if (downloadedSize <= 0) {
@@ -480,6 +560,8 @@ async function downloadConcurrentRanges(
 ): Promise<number> {
     const ranges = computeByteRanges(totalSize, tuningConfig.downloadPartSize);
     const fileHandle = await fs.promises.open(archivePath, "w+");
+    const progress = new DownloadProgress(totalSize);
+    progress.start();
     try {
         let nextIndex = 0;
         const workerCount = Math.min(
@@ -490,10 +572,12 @@ async function downloadConcurrentRanges(
             while (nextIndex < ranges.length) {
                 const range = ranges[nextIndex++];
                 await downloadRangeWithRetry(s3Key, range, fileHandle);
+                progress.addBytes(range.end - range.start + 1);
             }
         });
         await Promise.all(workers);
     } finally {
+        progress.stop();
         await fileHandle.close();
     }
 
@@ -635,6 +719,10 @@ export async function saveCache(
         );
         core.info(`Uploading cache to s3://${bucketName}/${s3Key}`);
 
+        const totalParts = Math.max(
+            1,
+            Math.ceil(size / tuningConfig.uploadPartSize)
+        );
         const upload = new Upload({
             client: s3Client,
             params: {
@@ -644,6 +732,11 @@ export async function saveCache(
             },
             partSize: tuningConfig.uploadPartSize,
             queueSize: tuningConfig.uploadQueueSize
+        });
+        upload.on("httpUploadProgress", progress => {
+            if (progress.part !== undefined) {
+                core.info(`Uploaded part ${progress.part}/${totalParts}`);
+            }
         });
         await upload.done();
         core.info("Cache saved successfully");

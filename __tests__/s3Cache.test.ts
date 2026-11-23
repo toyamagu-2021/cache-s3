@@ -26,13 +26,23 @@ const mockSend =
         ) => Promise<unknown>
     >();
 const mockUploadDone = jest.fn<() => Promise<void>>();
+const mockUploadOn =
+    jest.fn<
+        (
+            event: string,
+            listener: (progress: { part?: number; loaded?: number }) => void
+        ) => void
+    >();
 const mockUpload = jest.fn<
     (options: {
         params: { Key: string };
         partSize: number;
         queueSize: number;
-    }) => { done: () => Promise<void> }
->(() => ({ done: mockUploadDone }));
+    }) => {
+        on: typeof mockUploadOn;
+        done: () => Promise<void>;
+    }
+>(() => ({ on: mockUploadOn, done: mockUploadDone }));
 const mockWarning = jest.fn<(message: string | Error) => void>();
 const mockInfo = jest.fn<(message: string) => void>();
 
@@ -93,6 +103,7 @@ beforeEach(() => {
         glob: async () => ["/tmp/cached-dir"]
     });
     mockUploadDone.mockResolvedValue(undefined);
+    mockUploadOn.mockReset();
     mockUpload.mockClear();
     mockS3Client.mockClear();
     mockWarning.mockClear();
@@ -961,5 +972,116 @@ describe("S3 download timeout", () => {
         expect(key).toBe("key");
         expect(attemptsByRange["bytes=0-3"]).toBe(2);
         expect(restoredBytes?.toString()).toBe("abcdefgh");
+    });
+});
+
+describe("S3 transfer progress logging", () => {
+    test("saveCache logs uploaded part progress and ignores events without part number", async () => {
+        mockUploadOn.mockImplementation((event, listener) => {
+            if (event === "httpUploadProgress") {
+                mockUploadDone.mockImplementationOnce(async () => {
+                    listener({ loaded: 3 });
+                    listener({ part: 1, loaded: 7 });
+                });
+            }
+        });
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUploadOn).toHaveBeenCalledWith(
+            "httpUploadProgress",
+            expect.any(Function)
+        );
+        expect(mockInfo).toHaveBeenCalledWith("Uploaded part 1/1");
+        const partLogs = mockInfo.mock.calls
+            .map(call => call[0])
+            .filter(msg => msg.startsWith("Uploaded part "));
+        expect(partLogs).toEqual(["Uploaded part 1/1"]);
+    });
+
+    test("single download logs download progress", async () => {
+        const payload = Buffer.from("0123456789");
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: payload.length
+                        }
+                    ]
+                };
+            }
+            return {
+                ContentLength: payload.length,
+                Body: Readable.from([
+                    payload.subarray(0, 4),
+                    payload.subarray(4)
+                ])
+            };
+        });
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(mockInfo).toHaveBeenCalledWith(
+            expect.stringMatching(/^Received 10 of 10 \(100\.0%\), .+ MB\/s$/)
+        );
+    });
+
+    test("concurrent Range download logs download progress", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "2";
+        const fullPayload = Buffer.from("0123456789");
+
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: fullPayload.length
+                        }
+                    ]
+                };
+            }
+            const rangeHeader = command.input.Range as string;
+            const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+            const start = Number(match![1]);
+            const end = Number(match![2]);
+            return {
+                ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                Body: Readable.from([fullPayload.subarray(start, end + 1)])
+            };
+        });
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(mockInfo).toHaveBeenCalledWith(
+            expect.stringMatching(/^Received 10 of 10 \(100\.0%\), .+ MB\/s$/)
+        );
+    });
+
+    test("DownloadProgress avoids duplicate final display and clamps elapsed time", async () => {
+        const { DownloadProgress } = await loadS3Cache();
+        const progress = new DownloadProgress(100);
+        progress.addBytes(50);
+        progress.display();
+        progress.stop();
+
+        const receivedLogs = mockInfo.mock.calls
+            .map(call => call[0])
+            .filter(msg => msg.startsWith("Received "));
+        expect(receivedLogs).toHaveLength(1);
+        expect(receivedLogs[0]).toMatch(
+            /^Received 50 of 100 \(50\.0%\), \d+\.\d MB\/s$/
+        );
     });
 });
