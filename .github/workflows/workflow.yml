@@ -41,11 +41,56 @@ jobs:
     - name: Build & Test
       run: pnpm test
 
-  # End to end save and restore
+  # End to end save and restore (Ubuntu separated so required checks don't wait on macOS runners)
+  test-save-ubuntu:
+    name: test-save (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
+    - name: Generate files in working directory
+      shell: bash
+      run: __tests__/create-cache-files.sh ${{ runner.os }} test-cache
+    - name: Generate files outside working directory
+      shell: bash
+      run: __tests__/create-cache-files.sh ${{ runner.os }} ~/test-cache
+    - name: Save cache
+      uses: ./
+      with:
+        key: test-${{ runner.os }}-${{ github.run_id }}
+        path: |
+          test-cache
+          ~/test-cache
+
+  test-restore-ubuntu:
+    name: test-restore (ubuntu-latest)
+    needs: test-save-ubuntu
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
+    - name: Restore cache
+      uses: ./
+      with:
+        key: test-${{ runner.os }}-${{ github.run_id }}
+        path: |
+          test-cache
+          ~/test-cache
+    - name: Verify cache files in working directory
+      shell: bash
+      run: __tests__/verify-cache-files.sh ${{ runner.os }} test-cache
+    - name: Verify cache files outside working directory
+      shell: bash
+      run: __tests__/verify-cache-files.sh ${{ runner.os }} ~/test-cache
+
   test-save:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: [windows-latest, macOS-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
@@ -71,7 +116,7 @@ jobs:
     needs: test-save
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: [windows-latest, macOS-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:

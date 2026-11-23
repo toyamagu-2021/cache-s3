@@ -20,7 +20,7 @@ export async function saveImpl(
 ): Promise<number | void> {
     let cacheId = -1;
     try {
-        if (!utils.isCacheFeatureAvailable()) {
+        if (!s3Cache.isS3Available() && !utils.isCacheFeatureAvailable()) {
             return;
         }
 

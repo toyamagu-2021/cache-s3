@@ -132804,7 +132804,7 @@ async function extractArchive(archivePath, compression) {
         await exec_exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
 }
-async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = []) {
+async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
@@ -132832,6 +132832,9 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = []) {
     }
     if (!s3Key || !matchedKey) {
         return undefined;
+    }
+    if (options?.lookupOnly) {
+        return matchedKey;
     }
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
@@ -133001,7 +133004,7 @@ Otherwise please upgrade to GHES version >= 3.5 and If you are also using Github
 
 async function restoreImpl(stateProvider, earlyExit) {
     try {
-        if (!isCacheFeatureAvailable()) {
+        if (!isS3Available() && !isCacheFeatureAvailable()) {
             setOutput(constants_Outputs.CacheHit, "false");
             return;
         }
@@ -133020,7 +133023,9 @@ async function restoreImpl(stateProvider, earlyExit) {
         const failOnCacheMiss = getInputAsBool(Inputs.FailOnCacheMiss);
         const lookupOnly = getInputAsBool(Inputs.LookupOnly);
         const cacheKey = isS3Available()
-            ? await s3Cache_restoreCache(cachePaths, primaryKey, restoreKeys)
+            ? await s3Cache_restoreCache(cachePaths, primaryKey, restoreKeys, {
+                lookupOnly: lookupOnly
+            })
             : await restoreCache(cachePaths, primaryKey, restoreKeys, { lookupOnly: lookupOnly }, enableCrossOsArchive);
         if (!cacheKey) {
             // `cache-hit` is intentionally not set to `false` here to preserve existing behavior

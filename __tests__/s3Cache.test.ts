@@ -187,4 +187,17 @@ describe("restoreCache", () => {
             "/"
         ]);
     });
+
+    test("skips download and extraction when lookupOnly is true", async () => {
+        mockSend.mockClear();
+        mockExec.mockClear();
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key", [], { lookupOnly: true });
+
+        expect(key).toBe("key");
+        expect(mockSend).toHaveBeenCalledTimes(1);
+        expect(mockExec).not.toHaveBeenCalled();
+    });
 });

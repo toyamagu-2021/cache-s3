@@ -132815,7 +132815,7 @@ async function extractArchive(archivePath, compression) {
         await exec.exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
 }
-async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = []) {
+async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
@@ -132843,6 +132843,9 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = []) {
     }
     if (!s3Key || !matchedKey) {
         return undefined;
+    }
+    if (options?.lookupOnly) {
+        return matchedKey;
     }
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
@@ -133017,7 +133020,7 @@ process.on("uncaughtException", e => logWarning(e.message));
 async function saveImpl(stateProvider) {
     let cacheId = -1;
     try {
-        if (!isCacheFeatureAvailable()) {
+        if (!isS3Available() && !isCacheFeatureAvailable()) {
             return;
         }
         if (!isValidEvent()) {
