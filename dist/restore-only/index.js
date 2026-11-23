@@ -132732,14 +132732,33 @@ async function getCompression() {
         return "gzip";
     }
 }
-function cacheVersion(paths, compression) {
+function s3Cache_checkPaths(paths) {
+    if (!paths || paths.length === 0) {
+        throw new Error("Path Validation Error: At least one directory or file path is required");
+    }
+}
+function s3Cache_checkKey(key) {
+    if (key.length > 512) {
+        throw new Error(`Key Validation Error: ${key} cannot be larger than 512 characters.`);
+    }
+    const regex = /^[^,]*$/;
+    if (!regex.test(key)) {
+        throw new Error(`Key Validation Error: ${key} cannot contain commas.`);
+    }
+}
+function cacheVersion(paths, compression, enableCrossOsArchive = false) {
+    const components = [...paths, compression];
+    if (process.platform === "win32" && !enableCrossOsArchive) {
+        components.push("windows-only");
+    }
+    components.push("1.1");
     return external_crypto_namespaceObject.createHash("sha256")
-        .update([...paths, compression, "1.1"].join("|"))
+        .update(components.join("|"))
         .digest("hex");
 }
-function s3Prefix(paths, compression) {
+function s3Prefix(paths, compression, enableCrossOsArchive = false) {
     const repo = process.env["GITHUB_REPOSITORY"];
-    const version = cacheVersion(paths, compression);
+    const version = cacheVersion(paths, compression, enableCrossOsArchive);
     return `cache/${repo}/${version}/`;
 }
 async function createTempDir() {
@@ -132804,13 +132823,20 @@ async function extractArchive(archivePath, compression) {
         await exec_exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
 }
-async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options) {
+async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options, enableCrossOsArchive = false) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
-    const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression);
+    s3Cache_checkPaths(paths);
     const keys = [primaryKey, ...restoreKeys];
+    if (keys.length > 10) {
+        throw new Error("Key Validation Error: Keys are limited to a maximum of 10.");
+    }
+    for (const key of keys) {
+        s3Cache_checkKey(key);
+    }
+    const compression = await getCompression();
+    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
     let matchedKey;
     let s3Key;
     for (const key of keys) {
@@ -132862,12 +132888,14 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
             .catch(() => undefined);
     }
 }
-async function s3Cache_saveCache(paths, key) {
+async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
+    s3Cache_checkPaths(paths);
+    s3Cache_checkKey(key);
     const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression);
+    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
     const s3Key = `${prefix}${key}`;
     const resolved = await s3Cache_resolvePaths(paths);
     if (resolved.length === 0) {
@@ -133025,7 +133053,7 @@ async function restoreImpl(stateProvider, earlyExit) {
         const cacheKey = isS3Available()
             ? await s3Cache_restoreCache(cachePaths, primaryKey, restoreKeys, {
                 lookupOnly: lookupOnly
-            })
+            }, enableCrossOsArchive)
             : await restoreCache(cachePaths, primaryKey, restoreKeys, { lookupOnly: lookupOnly }, enableCrossOsArchive);
         if (!cacheKey) {
             // `cache-hit` is intentionally not set to `false` here to preserve existing behavior
