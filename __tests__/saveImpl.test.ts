@@ -319,3 +319,29 @@ test("save with S3 available and AC unavailable still saves to S3", async () => 
         `Cache saved with key: ${primaryKey}`
     );
 });
+
+test("save with S3 available forwards enableCrossOsArchive=true", async () => {
+    const primaryKey = "Linux-node-bb828da54c148048dd17899ba9fda624811cfb43";
+    const savedCacheKey = "Linux-node-";
+
+    (core.getState as jest.Mock)
+        .mockReturnValueOnce(primaryKey)
+        .mockReturnValueOnce(savedCacheKey);
+
+    const inputPath = "node_modules";
+    testUtils.setInputs({
+        path: inputPath,
+        enableCrossOsArchive: true
+    });
+
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
+    jest.mocked(s3Cache.saveCache).mockResolvedValue(undefined);
+
+    await saveImpl(new StateProvider());
+
+    expect(s3Cache.saveCache).toHaveBeenCalledWith(
+        [inputPath],
+        primaryKey,
+        true
+    );
+});
