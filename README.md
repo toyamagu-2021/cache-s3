@@ -6,12 +6,17 @@ If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub ca
 
 ## S3 backend configuration
 
-| Environment variable      | Description                                         |
-|---------------------------|-----------------------------------------------------|
-| `CACHE_S3_BUCKET`         | S3 bucket name (required to enable S3 backend)      |
-| `AWS_REGION`              | AWS region                                          |
-| `CACHE_S3_ENDPOINT`       | Custom endpoint URL (e.g. for MinIO)                |
-| `CACHE_S3_FORCE_PATH_STYLE` | Set to `true` for path-style S3 URLs             |
+| Environment variable          | Description                                                                   |
+|-------------------------------|-------------------------------------------------------------------------------|
+| `CACHE_S3_BUCKET`             | S3 bucket name (required to enable S3 backend)                                |
+| `AWS_REGION`                  | AWS region                                                                    |
+| `CACHE_S3_ENDPOINT`           | Custom endpoint URL (e.g. for MinIO)                                          |
+| `CACHE_S3_FORCE_PATH_STYLE`   | Set to `true` for path-style S3 URLs                                          |
+| `CACHE_S3_PREFIX`             | Custom S3 key prefix override (default: `cache/<owner>/<repo>`)               |
+| `CACHE_S3_UPLOAD_QUEUE_SIZE`  | Number of concurrent upload parts (default: `4`)                              |
+| `CACHE_S3_UPLOAD_PART_SIZE`   | Upload part size in bytes (default: `33554432`, 32 MiB; minimum: `5242880`, 5 MiB) |
+| `CACHE_S3_DOWNLOAD_QUEUE_SIZE`| Number of concurrent `Range` download parts (default: `4`)                    |
+| `CACHE_S3_DOWNLOAD_PART_SIZE` | Download part size in bytes for `Range` requests (default: `33554432`, 32 MiB)|
 
 AWS credentials are resolved via the standard SDK credential chain (env vars, instance profile, etc.).
 
