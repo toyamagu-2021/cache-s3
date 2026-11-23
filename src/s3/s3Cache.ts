@@ -12,12 +12,13 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { Readable } from "stream";
+import { Readable, Transform } from "stream";
 import { pipeline } from "stream/promises";
 
 const DEFAULT_QUEUE_SIZE = 4;
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
 const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 30_000;
 const MAX_DOWNLOAD_RETRIES = 3;
 
 export type S3TuningConfig = {
@@ -26,6 +27,7 @@ export type S3TuningConfig = {
     uploadPartSize: number;
     downloadQueueSize: number;
     downloadPartSize: number;
+    downloadTimeoutMs: number;
 };
 
 export type ByteRange = {
@@ -33,6 +35,79 @@ export type ByteRange = {
     start: number;
     end: number;
 };
+
+export function unsetAmbientAwsCredentials(env: NodeJS.ProcessEnv): void {
+    if (env["CACHE_S3_UNSET_AWS_CREDENTIALS"] === "true") {
+        delete env["AWS_ACCESS_KEY_ID"];
+        delete env["AWS_SECRET_ACCESS_KEY"];
+        delete env["AWS_SESSION_TOKEN"];
+    }
+}
+
+export class DownloadProgress {
+    readonly totalBytes: number;
+    private transferred = 0;
+    private startTime = Date.now();
+    private timer: ReturnType<typeof setInterval> | undefined;
+    private lastDisplayedBytes = -1;
+
+    constructor(totalBytes: number) {
+        this.totalBytes = totalBytes;
+    }
+
+    addBytes(bytes: number): void {
+        if (bytes > 0) {
+            this.transferred += bytes;
+        }
+    }
+
+    start(intervalMs = 1000): void {
+        this.startTime = Date.now();
+        this.stopTimer();
+        this.timer = setInterval(() => this.display(), intervalMs);
+        this.timer.unref?.();
+    }
+
+    display(): void {
+        const elapsedSeconds = Math.max(
+            (Date.now() - this.startTime) / 1000,
+            0.001
+        );
+        const speedMBs = (
+            this.transferred /
+            (1024 * 1024) /
+            elapsedSeconds
+        ).toFixed(1);
+        const pct =
+            this.totalBytes > 0
+                ? Math.min(
+                      100,
+                      (this.transferred / this.totalBytes) * 100
+                  ).toFixed(1)
+                : "0.0";
+        core.info(
+            `Received ${this.transferred} of ${this.totalBytes} (${pct}%), ${speedMBs} MB/s`
+        );
+        this.lastDisplayedBytes = this.transferred;
+    }
+
+    stop(): void {
+        this.stopTimer();
+        if (
+            this.transferred > 0 &&
+            this.lastDisplayedBytes !== this.transferred
+        ) {
+            this.display();
+        }
+    }
+
+    private stopTimer(): void {
+        if (this.timer !== undefined) {
+            clearInterval(this.timer);
+            this.timer = undefined;
+        }
+    }
+}
 
 export function parsePositiveInt(
     name: string,
@@ -77,10 +152,14 @@ export function computeByteRanges(
     return ranges;
 }
 
+unsetAmbientAwsCredentials(process.env);
+
 const bucketName = process.env["CACHE_S3_BUCKET"];
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
 const endpoint = process.env["CACHE_S3_ENDPOINT"];
-const forcePathStyle = process.env["CACHE_S3_FORCE_PATH_STYLE"] === "true";
+const forcePathStyle =
+    process.env["CACHE_S3_FORCE_PATH_STYLE"] === "true" ||
+    process.env["AWS_S3_FORCE_PATH_STYLE"] === "true";
 
 const tuningConfig: S3TuningConfig = {
     prefix: (process.env["CACHE_S3_PREFIX"] ?? "")
@@ -106,6 +185,11 @@ const tuningConfig: S3TuningConfig = {
         "CACHE_S3_DOWNLOAD_PART_SIZE",
         process.env["CACHE_S3_DOWNLOAD_PART_SIZE"],
         DEFAULT_PART_SIZE
+    ),
+    downloadTimeoutMs: parsePositiveInt(
+        "CACHE_S3_DOWNLOAD_TIMEOUT_MS",
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"],
+        DEFAULT_DOWNLOAD_TIMEOUT_MS
     )
 };
 
@@ -252,6 +336,22 @@ async function extractArchive(
     }
 }
 
+async function listArchive(
+    archivePath: string,
+    compression: Compression
+): Promise<void> {
+    if (compression === "zstd") {
+        await exec.exec("tar", [
+            "--use-compress-program",
+            await zstdDecompressProgram(),
+            "-tf",
+            archivePath
+        ]);
+    } else {
+        await exec.exec("tar", ["-tzf", archivePath]);
+    }
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -262,14 +362,44 @@ async function downloadSingleWithRetry(
     expectedSize?: number
 ): Promise<number> {
     for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(
+            () =>
+                controller.abort(
+                    new Error(
+                        `Download timed out after ${tuningConfig.downloadTimeoutMs}ms`
+                    )
+                ),
+            tuningConfig.downloadTimeoutMs
+        );
         try {
             const { Body, ContentLength } = await s3Client.send(
-                new GetObjectCommand({ Bucket: bucketName, Key: s3Key })
+                new GetObjectCommand({ Bucket: bucketName, Key: s3Key }),
+                { abortSignal: controller.signal }
             );
             if (!Body) {
                 throw new Error("Empty response body from S3");
             }
-            await pipeline(Body as Readable, fs.createWriteStream(archivePath));
+            const progress = new DownloadProgress(
+                expectedSize ?? ContentLength ?? 0
+            );
+            progress.start();
+            try {
+                const progressStream = new Transform({
+                    transform(chunk, _encoding, callback) {
+                        progress.addBytes(Buffer.byteLength(chunk));
+                        callback(null, chunk);
+                    }
+                });
+                await pipeline(
+                    Body as Readable,
+                    progressStream,
+                    fs.createWriteStream(archivePath),
+                    { signal: controller.signal }
+                );
+            } finally {
+                progress.stop();
+            }
 
             const downloadedSize = fs.statSync(archivePath).size;
             if (downloadedSize <= 0) {
@@ -287,6 +417,8 @@ async function downloadSingleWithRetry(
                 throw err;
             }
             await sleep(200 * attempt);
+        } finally {
+            clearTimeout(timeoutId);
         }
     }
     throw new Error("Download failed after retries");
@@ -300,18 +432,47 @@ async function downloadRangeWithRetry(
     const expectedLength = range.end - range.start + 1;
     const expectedContentRangePrefix = `bytes ${range.start}-${range.end}/`;
     for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
+        const controller = new AbortController();
+        let bodyStream: Readable | undefined;
+        const abortReason = (): Error =>
+            controller.signal.reason instanceof Error
+                ? controller.signal.reason
+                : new Error(
+                      `Download timed out after ${tuningConfig.downloadTimeoutMs}ms`
+                  );
+        const onAbort = (): void => {
+            if (bodyStream && typeof bodyStream.destroy === "function") {
+                bodyStream.destroy(abortReason());
+            }
+        };
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        const timeoutId = setTimeout(
+            () =>
+                controller.abort(
+                    new Error(
+                        `Download timed out after ${tuningConfig.downloadTimeoutMs}ms`
+                    )
+                ),
+            tuningConfig.downloadTimeoutMs
+        );
         try {
             const { Body, ContentRange } = await s3Client.send(
                 new GetObjectCommand({
                     Bucket: bucketName,
                     Key: s3Key,
                     Range: `bytes=${range.start}-${range.end}`
-                })
+                }),
+                { abortSignal: controller.signal }
             );
             if (!Body) {
                 throw new Error(
                     `Empty response body for range ${range.start}-${range.end}`
                 );
+            }
+            bodyStream = Body as Readable;
+            if (controller.signal.aborted) {
+                onAbort();
+                throw abortReason();
             }
             if (
                 ContentRange !== undefined &&
@@ -322,7 +483,10 @@ async function downloadRangeWithRetry(
                 );
             }
             let bytesWritten = 0;
-            for await (const chunk of Body as Readable) {
+            for await (const chunk of bodyStream) {
+                if (controller.signal.aborted) {
+                    throw abortReason();
+                }
                 const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
                 if (bytesWritten + buf.length > expectedLength) {
                     throw new Error(
@@ -341,6 +505,9 @@ async function downloadRangeWithRetry(
                     chunkOffset += written;
                 }
             }
+            if (controller.signal.aborted) {
+                throw abortReason();
+            }
             if (bytesWritten !== expectedLength) {
                 throw new Error(
                     `Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, got ${bytesWritten} bytes`
@@ -352,6 +519,9 @@ async function downloadRangeWithRetry(
                 throw err;
             }
             await sleep(200 * attempt);
+        } finally {
+            clearTimeout(timeoutId);
+            controller.signal.removeEventListener("abort", onAbort);
         }
     }
 }
@@ -363,6 +533,8 @@ async function downloadConcurrentRanges(
 ): Promise<number> {
     const ranges = computeByteRanges(totalSize, tuningConfig.downloadPartSize);
     const fileHandle = await fs.promises.open(archivePath, "w+");
+    const progress = new DownloadProgress(totalSize);
+    progress.start();
     try {
         let nextIndex = 0;
         const workerCount = Math.min(
@@ -373,10 +545,12 @@ async function downloadConcurrentRanges(
             while (nextIndex < ranges.length) {
                 const range = ranges[nextIndex++];
                 await downloadRangeWithRetry(s3Key, range, fileHandle);
+                progress.addBytes(range.end - range.start + 1);
             }
         });
         await Promise.all(workers);
     } finally {
+        progress.stop();
         await fileHandle.close();
     }
 
@@ -410,6 +584,7 @@ export async function restoreCache(
     for (const key of keys) {
         checkKey(key);
     }
+    core.debug(`Resolved Keys: ${JSON.stringify(keys)}`);
 
     const compression = await getCompression();
     const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
@@ -453,6 +628,7 @@ export async function restoreCache(
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
+    core.debug(`Archive Path: ${archivePath}`);
 
     try {
         if (objectSize === 0) {
@@ -468,6 +644,10 @@ export async function restoreCache(
         core.info(
             `Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`
         );
+
+        if (core.isDebug()) {
+            await listArchive(archivePath, compression);
+        }
 
         await extractArchive(archivePath, compression);
         core.info("Cache restored successfully");
@@ -504,13 +684,19 @@ export async function saveCache(
             `Path Validation Error: Path(s) ${paths.join(", ")} do not exist.`
         );
     }
+    core.debug(`Cache Paths: ${JSON.stringify(resolved)}`);
 
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
+    core.debug(`Archive Path: ${archivePath}`);
 
     try {
         await createArchive(archivePath, resolved, compression);
+
+        if (core.isDebug()) {
+            await listArchive(archivePath, compression);
+        }
 
         const size = fs.statSync(archivePath).size;
         core.info(
@@ -518,6 +704,10 @@ export async function saveCache(
         );
         core.info(`Uploading cache to s3://${bucketName}/${s3Key}`);
 
+        const totalParts = Math.max(
+            1,
+            Math.ceil(size / tuningConfig.uploadPartSize)
+        );
         const upload = new Upload({
             client: s3Client,
             params: {
@@ -527,6 +717,11 @@ export async function saveCache(
             },
             partSize: tuningConfig.uploadPartSize,
             queueSize: tuningConfig.uploadQueueSize
+        });
+        upload.on("httpUploadProgress", progress => {
+            if (progress.part !== undefined) {
+                core.info(`Uploaded part ${progress.part}/${totalParts}`);
+            }
         });
         await upload.done();
         core.info("Cache saved successfully");

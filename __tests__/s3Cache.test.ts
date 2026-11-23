@@ -20,29 +20,46 @@ const mockGlobCreate =
     >();
 const mockSend =
     jest.fn<
-        (command: { input: Record<string, unknown> }) => Promise<unknown>
+        (
+            command: { input: Record<string, unknown> },
+            options?: { abortSignal?: AbortSignal }
+        ) => Promise<unknown>
     >();
+const mockS3Client = jest.fn<
+    (config: Record<string, unknown>) => { send: typeof mockSend }
+>(() => ({ send: mockSend }));
 const mockUploadDone = jest.fn<() => Promise<void>>();
+const mockUploadOn =
+    jest.fn<
+        (event: string, listener: (progress: { part?: number }) => void) => void
+    >();
 const mockUpload = jest.fn<
     (options: {
         params: { Key: string };
         partSize: number;
         queueSize: number;
-    }) => { done: () => Promise<void> }
->(() => ({ done: mockUploadDone }));
+    }) => {
+        on: typeof mockUploadOn;
+        done: () => Promise<void>;
+    }
+>(() => ({ on: mockUploadOn, done: mockUploadDone }));
 const mockWarning = jest.fn<(message: string | Error) => void>();
 const mockInfo = jest.fn<(message: string) => void>();
+const mockDebug = jest.fn<(message: string) => void>();
+const mockIsDebug = jest.fn<() => boolean>(() => false);
 
 jest.unstable_mockModule("@actions/core", () => ({
     warning: mockWarning,
-    info: mockInfo
+    info: mockInfo,
+    debug: mockDebug,
+    isDebug: mockIsDebug
 }));
 jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
 jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
 jest.unstable_mockModule("@actions/glob", () => ({ create: mockGlobCreate }));
 
 jest.unstable_mockModule("@aws-sdk/client-s3", () => ({
-    S3Client: jest.fn(() => ({ send: mockSend })),
+    S3Client: mockS3Client,
     ListObjectsV2Command: jest.fn(input => ({ input })),
     GetObjectCommand: jest.fn(input => ({ input }))
 }));
@@ -86,9 +103,14 @@ beforeEach(() => {
         glob: async () => ["/tmp/cached-dir"]
     });
     mockUploadDone.mockResolvedValue(undefined);
+    mockUploadOn.mockReset();
     mockUpload.mockClear();
+    mockS3Client.mockClear();
     mockWarning.mockClear();
     mockInfo.mockClear();
+    mockDebug.mockClear();
+    mockIsDebug.mockReset();
+    mockIsDebug.mockReturnValue(false);
     mockSend.mockClear();
     mockExec.mockClear();
 
@@ -106,12 +128,20 @@ beforeEach(() => {
 afterEach(() => {
     delete process.env["CACHE_S3_BUCKET"];
     delete process.env["AWS_REGION"];
+    delete process.env["AWS_DEFAULT_REGION"];
+    delete process.env["AWS_ACCESS_KEY_ID"];
+    delete process.env["AWS_SECRET_ACCESS_KEY"];
+    delete process.env["AWS_SESSION_TOKEN"];
+    delete process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"];
+    delete process.env["CACHE_S3_FORCE_PATH_STYLE"];
+    delete process.env["AWS_S3_FORCE_PATH_STYLE"];
     delete process.env["GITHUB_REPOSITORY"];
     delete process.env["CACHE_S3_PREFIX"];
     delete process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"];
     delete process.env["CACHE_S3_UPLOAD_PART_SIZE"];
     delete process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"];
     delete process.env["CACHE_S3_DOWNLOAD_PART_SIZE"];
+    delete process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"];
 });
 
 describe("saveCache", () => {
@@ -632,5 +662,463 @@ describe("S3 prefix and tuning configuration", () => {
         expect(mockUpload).toHaveBeenCalledTimes(1);
         expect(mockUpload.mock.calls[0][0].queueSize).toBe(4);
         expect(mockUpload.mock.calls[0][0].partSize).toBe(32 * 1024 * 1024);
+    });
+
+    test("CACHE_S3_UNSET_AWS_CREDENTIALS=true deletes AWS credential env vars while preserving region vars", async () => {
+        process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"] = "true";
+        process.env["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE";
+        process.env["AWS_SECRET_ACCESS_KEY"] = "secret";
+        process.env["AWS_SESSION_TOKEN"] = "token";
+        process.env["AWS_REGION"] = "ap-northeast-1";
+        process.env["AWS_DEFAULT_REGION"] = "us-west-2";
+
+        await loadS3Cache();
+
+        expect(process.env["AWS_ACCESS_KEY_ID"]).toBeUndefined();
+        expect(process.env["AWS_SECRET_ACCESS_KEY"]).toBeUndefined();
+        expect(process.env["AWS_SESSION_TOKEN"]).toBeUndefined();
+        expect(process.env["AWS_REGION"]).toBe("ap-northeast-1");
+        expect(process.env["AWS_DEFAULT_REGION"]).toBe("us-west-2");
+    });
+
+    test("leaves AWS credential env vars intact when CACHE_S3_UNSET_AWS_CREDENTIALS is unset or false", async () => {
+        process.env["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE";
+        process.env["AWS_SECRET_ACCESS_KEY"] = "secret";
+        process.env["AWS_SESSION_TOKEN"] = "token";
+
+        await loadS3Cache();
+
+        expect(process.env["AWS_ACCESS_KEY_ID"]).toBe("AKIAEXAMPLE");
+        expect(process.env["AWS_SECRET_ACCESS_KEY"]).toBe("secret");
+        expect(process.env["AWS_SESSION_TOKEN"]).toBe("token");
+
+        process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"] = "false";
+        await loadS3Cache();
+
+        expect(process.env["AWS_ACCESS_KEY_ID"]).toBe("AKIAEXAMPLE");
+        expect(process.env["AWS_SECRET_ACCESS_KEY"]).toBe("secret");
+        expect(process.env["AWS_SESSION_TOKEN"]).toBe("token");
+    });
+
+    test("AWS_S3_FORCE_PATH_STYLE=true enables forcePathStyle on S3Client", async () => {
+        process.env["AWS_S3_FORCE_PATH_STYLE"] = "true";
+
+        await loadS3Cache();
+
+        expect(mockS3Client).toHaveBeenCalledWith(
+            expect.objectContaining({ forcePathStyle: true })
+        );
+    });
+});
+
+describe("download timeouts", () => {
+    function stalledReadable(): Readable {
+        return new Readable({
+            read() {
+                // Intentionally never pushes data or ends
+            }
+        });
+    }
+
+    test("aborts a stalled single-object download after CACHE_S3_DOWNLOAD_TIMEOUT_MS and succeeds on retry", async () => {
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "50";
+        let getAttempts = 0;
+
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                getAttempts++;
+                if (getAttempts === 1) {
+                    return { Body: stalledReadable() };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(getAttempts).toBe(2);
+        expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    test("returns undefined when single-object download times out across all retries", async () => {
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "30";
+        let getAttempts = 0;
+
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                getAttempts++;
+                return { Body: stalledReadable() };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        expect(getAttempts).toBe(3);
+        expect(mockExec).not.toHaveBeenCalled();
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("Failed to restore cache:")
+        );
+    });
+
+    test("aborts a stalled Range download after CACHE_S3_DOWNLOAD_TIMEOUT_MS and succeeds on retry", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "2";
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "50";
+
+        const fullPayload = Buffer.from("01234567");
+        const rangeCalls: Record<string, number> = {};
+        let restoredBytes: Buffer | undefined;
+
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: fullPayload.length
+                            }
+                        ]
+                    };
+                }
+                const rangeHeader = command.input.Range as string;
+                rangeCalls[rangeHeader] = (rangeCalls[rangeHeader] ?? 0) + 1;
+
+                if (
+                    rangeHeader === "bytes=0-3" &&
+                    rangeCalls[rangeHeader] === 1
+                ) {
+                    return {
+                        ContentRange: `bytes 0-3/${fullPayload.length}`,
+                        Body: stalledReadable()
+                    };
+                }
+
+                const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+                const start = Number(match![1]);
+                const end = Number(match![2]);
+                return {
+                    ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                    Body: Readable.from([fullPayload.subarray(start, end + 1)])
+                };
+            }
+        );
+
+        mockExec.mockImplementation(
+            async (_tool: string, args: string[] = []) => {
+                const xfIdx = args.findIndex(arg => /^-x[z]?f$/.test(arg));
+                if (xfIdx !== -1) {
+                    restoredBytes = await fs.promises.readFile(args[xfIdx + 1]);
+                }
+                return 0;
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(rangeCalls).toEqual({
+            "bytes=0-3": 2,
+            "bytes=4-7": 1
+        });
+        expect(restoredBytes?.toString()).toBe("01234567");
+    });
+
+    test("returns undefined when a Range download times out across all retries", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "2";
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "30";
+
+        let stalledAttempts = 0;
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 8
+                            }
+                        ]
+                    };
+                }
+                const rangeHeader = command.input.Range as string;
+                if (rangeHeader === "bytes=0-3") {
+                    stalledAttempts++;
+                    return {
+                        ContentRange: "bytes 0-3/8",
+                        Body: stalledReadable()
+                    };
+                }
+                return {
+                    ContentRange: "bytes 4-7/8",
+                    Body: Readable.from([Buffer.from("4567")])
+                };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        expect(stalledAttempts).toBe(3);
+        expect(mockExec).not.toHaveBeenCalled();
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("timed out")
+        );
+    });
+});
+
+describe("transfer progress logging", () => {
+    test("logs uploaded part progress from httpUploadProgress events", async () => {
+        mockUploadOn.mockImplementation((event, listener) => {
+            if (event === "httpUploadProgress") {
+                listener({});
+                listener({ part: 1 });
+            }
+        });
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "key");
+
+        expect(mockUploadOn).toHaveBeenCalledWith(
+            "httpUploadProgress",
+            expect.any(Function)
+        );
+        expect(mockInfo).toHaveBeenCalledWith("Uploaded part 1/1");
+    });
+
+    test("logs download progress for single-object and Range downloads without NaN or Infinity", async () => {
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        await (await loadS3Cache()).restoreCache(["/tmp/cached-dir"], "key");
+
+        const singleProgressLogs = mockInfo.mock.calls
+            .map(call => call[0])
+            .filter(msg => msg.startsWith("Received "));
+        expect(singleProgressLogs).toHaveLength(1);
+        expect(singleProgressLogs[0]).toMatch(
+            /^Received 7 of 7 \(100\.0%\), \d+\.\d MB\/s$/
+        );
+
+        mockInfo.mockClear();
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 8
+                            }
+                        ]
+                    };
+                }
+                const rangeHeader = command.input.Range as string;
+                const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+                const start = Number(match![1]);
+                const end = Number(match![2]);
+                const payload = Buffer.from("01234567");
+                return {
+                    ContentRange: `bytes ${start}-${end}/8`,
+                    Body: Readable.from([payload.subarray(start, end + 1)])
+                };
+            }
+        );
+
+        await (await loadS3Cache()).restoreCache(["/tmp/cached-dir"], "key");
+
+        const rangeProgressLogs = mockInfo.mock.calls
+            .map(call => call[0])
+            .filter(msg => msg.startsWith("Received "));
+        expect(rangeProgressLogs).toHaveLength(1);
+        expect(rangeProgressLogs[0]).toMatch(
+            /^Received 8 of 8 \(100\.0%\), \d+\.\d MB\/s$/
+        );
+    });
+});
+
+describe("debug archive listing and diagnostics", () => {
+    test("lists gzip archive in saveCache and restoreCache when core.isDebug() is true", async () => {
+        mockIsDebug.mockReturnValue(true);
+
+        const s3 = await loadS3Cache();
+        await s3.saveCache(["/tmp/cached-dir"], "key");
+
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[0][1]?.[0]).toBe("-czf");
+        expect(mockExec.mock.calls[1]).toEqual([
+            "tar",
+            ["-tzf", expect.stringMatching(/cache\.tar\.gz$/)]
+        ]);
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Cache Paths:")
+        );
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Archive Path:")
+        );
+
+        mockExec.mockClear();
+        mockDebug.mockClear();
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        await s3.restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[0]).toEqual([
+            "tar",
+            ["-tzf", expect.stringMatching(/cache\.tar\.gz$/)]
+        ]);
+        expect(mockExec.mock.calls[1][1]?.[0]).toBe("-xzf");
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Resolved Keys:")
+        );
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Archive Path:")
+        );
+    });
+
+    test("lists zstd archive with decompress program when core.isDebug() is true", async () => {
+        mockIsDebug.mockReturnValue(true);
+        mockAvailableTools("zstd", "unzstd");
+
+        const s3 = await loadS3Cache();
+        await s3.saveCache(["/tmp/cached-dir"], "key");
+
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[1]).toEqual([
+            "tar",
+            [
+                "--use-compress-program",
+                "unzstd",
+                "-tf",
+                expect.stringMatching(/cache\.tar\.zst$/)
+            ]
+        ]);
+
+        mockExec.mockClear();
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        await s3.restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[0]).toEqual([
+            "tar",
+            [
+                "--use-compress-program",
+                "unzstd",
+                "-tf",
+                expect.stringMatching(/cache\.tar\.zst$/)
+            ]
+        ]);
+        expect(mockExec.mock.calls[1][1]?.[2]).toBe("-xf");
+    });
+
+    test("does not list archive when core.isDebug() is false", async () => {
+        mockIsDebug.mockReturnValue(false);
+        const s3 = await loadS3Cache();
+
+        await s3.saveCache(["/tmp/cached-dir"], "key");
+        expect(mockExec).toHaveBeenCalledTimes(1);
+
+        mockExec.mockClear();
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        await s3.restoreCache(["/tmp/cached-dir"], "key");
+        expect(mockExec).toHaveBeenCalledTimes(1);
     });
 });
