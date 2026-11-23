@@ -34,6 +34,14 @@ export type ByteRange = {
     end: number;
 };
 
+export function unsetAmbientAwsCredentials(env: NodeJS.ProcessEnv): void {
+    if (env["CACHE_S3_UNSET_AWS_CREDENTIALS"] === "true") {
+        delete env["AWS_ACCESS_KEY_ID"];
+        delete env["AWS_SECRET_ACCESS_KEY"];
+        delete env["AWS_SESSION_TOKEN"];
+    }
+}
+
 export function parsePositiveInt(
     name: string,
     raw: string | undefined,
@@ -78,9 +86,15 @@ export function computeByteRanges(
 }
 
 const bucketName = process.env["CACHE_S3_BUCKET"];
+if (bucketName) {
+    unsetAmbientAwsCredentials(process.env);
+}
+
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
 const endpoint = process.env["CACHE_S3_ENDPOINT"];
-const forcePathStyle = process.env["CACHE_S3_FORCE_PATH_STYLE"] === "true";
+const forcePathStyle =
+    (process.env["CACHE_S3_FORCE_PATH_STYLE"] ||
+        process.env["AWS_S3_FORCE_PATH_STYLE"]) === "true";
 
 const tuningConfig: S3TuningConfig = {
     prefix: (process.env["CACHE_S3_PREFIX"] ?? "")

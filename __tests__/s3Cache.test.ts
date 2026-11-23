@@ -41,8 +41,12 @@ jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
 jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
 jest.unstable_mockModule("@actions/glob", () => ({ create: mockGlobCreate }));
 
+const mockS3Client = jest.fn<
+    (config: Record<string, unknown>) => { send: typeof mockSend }
+>(() => ({ send: mockSend }));
+
 jest.unstable_mockModule("@aws-sdk/client-s3", () => ({
-    S3Client: jest.fn(() => ({ send: mockSend })),
+    S3Client: mockS3Client,
     ListObjectsV2Command: jest.fn(input => ({ input })),
     GetObjectCommand: jest.fn(input => ({ input }))
 }));
@@ -87,6 +91,7 @@ beforeEach(() => {
     });
     mockUploadDone.mockResolvedValue(undefined);
     mockUpload.mockClear();
+    mockS3Client.mockClear();
     mockWarning.mockClear();
     mockInfo.mockClear();
     mockSend.mockClear();
@@ -106,8 +111,15 @@ beforeEach(() => {
 afterEach(() => {
     delete process.env["CACHE_S3_BUCKET"];
     delete process.env["AWS_REGION"];
+    delete process.env["AWS_DEFAULT_REGION"];
+    delete process.env["AWS_ACCESS_KEY_ID"];
+    delete process.env["AWS_SECRET_ACCESS_KEY"];
+    delete process.env["AWS_SESSION_TOKEN"];
     delete process.env["GITHUB_REPOSITORY"];
     delete process.env["CACHE_S3_PREFIX"];
+    delete process.env["CACHE_S3_FORCE_PATH_STYLE"];
+    delete process.env["AWS_S3_FORCE_PATH_STYLE"];
+    delete process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"];
     delete process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"];
     delete process.env["CACHE_S3_UPLOAD_PART_SIZE"];
     delete process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"];
@@ -632,5 +644,62 @@ describe("S3 prefix and tuning configuration", () => {
         expect(mockUpload).toHaveBeenCalledTimes(1);
         expect(mockUpload.mock.calls[0][0].queueSize).toBe(4);
         expect(mockUpload.mock.calls[0][0].partSize).toBe(32 * 1024 * 1024);
+    });
+});
+
+describe("S3 credential and path-style configuration", () => {
+    test("CACHE_S3_UNSET_AWS_CREDENTIALS=true with CACHE_S3_BUCKET set clears AWS credentials and preserves regions", async () => {
+        process.env["CACHE_S3_BUCKET"] = "test-bucket";
+        process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"] = "true";
+        process.env["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE";
+        process.env["AWS_SECRET_ACCESS_KEY"] = "secret";
+        process.env["AWS_SESSION_TOKEN"] = "token";
+        process.env["AWS_REGION"] = "us-west-2";
+        process.env["AWS_DEFAULT_REGION"] = "eu-west-1";
+
+        await loadS3Cache();
+
+        expect(process.env["AWS_ACCESS_KEY_ID"]).toBeUndefined();
+        expect(process.env["AWS_SECRET_ACCESS_KEY"]).toBeUndefined();
+        expect(process.env["AWS_SESSION_TOKEN"]).toBeUndefined();
+        expect(process.env["AWS_REGION"]).toBe("us-west-2");
+        expect(process.env["AWS_DEFAULT_REGION"]).toBe("eu-west-1");
+    });
+
+    test("CACHE_S3_UNSET_AWS_CREDENTIALS=true with CACHE_S3_BUCKET unset leaves AWS credentials intact", async () => {
+        delete process.env["CACHE_S3_BUCKET"];
+        process.env["CACHE_S3_UNSET_AWS_CREDENTIALS"] = "true";
+        process.env["AWS_ACCESS_KEY_ID"] = "AKIAEXAMPLE";
+        process.env["AWS_SECRET_ACCESS_KEY"] = "secret";
+        process.env["AWS_SESSION_TOKEN"] = "token";
+
+        const s3 = await loadS3Cache();
+
+        expect(s3.isS3Available()).toBe(false);
+        expect(process.env["AWS_ACCESS_KEY_ID"]).toBe("AKIAEXAMPLE");
+        expect(process.env["AWS_SECRET_ACCESS_KEY"]).toBe("secret");
+        expect(process.env["AWS_SESSION_TOKEN"]).toBe("token");
+    });
+
+    test("AWS_S3_FORCE_PATH_STYLE=true enables forcePathStyle when CACHE_S3_FORCE_PATH_STYLE is unset", async () => {
+        delete process.env["CACHE_S3_FORCE_PATH_STYLE"];
+        process.env["AWS_S3_FORCE_PATH_STYLE"] = "true";
+
+        await loadS3Cache();
+
+        expect(mockS3Client).toHaveBeenCalledWith(
+            expect.objectContaining({ forcePathStyle: true })
+        );
+    });
+
+    test("CACHE_S3_FORCE_PATH_STYLE=false overrides AWS_S3_FORCE_PATH_STYLE=true", async () => {
+        process.env["CACHE_S3_FORCE_PATH_STYLE"] = "false";
+        process.env["AWS_S3_FORCE_PATH_STYLE"] = "true";
+
+        await loadS3Cache();
+
+        expect(mockS3Client).toHaveBeenCalledWith(
+            expect.objectContaining({ forcePathStyle: false })
+        );
     });
 });
