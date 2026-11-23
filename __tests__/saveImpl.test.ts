@@ -309,7 +309,11 @@ test("save with S3 available and AC unavailable still saves to S3", async () => 
 
     await saveImpl(new StateProvider());
 
-    expect(s3Cache.saveCache).toHaveBeenCalledWith([inputPath], primaryKey);
+    expect(s3Cache.saveCache).toHaveBeenCalledWith(
+        [inputPath],
+        primaryKey,
+        false
+    );
     expect(cache.saveCache).not.toHaveBeenCalled();
     expect(core.info).toHaveBeenCalledWith(
         `Cache saved with key: ${primaryKey}`

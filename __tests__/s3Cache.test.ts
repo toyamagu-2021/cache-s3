@@ -200,4 +200,65 @@ describe("restoreCache", () => {
         expect(mockSend).toHaveBeenCalledTimes(1);
         expect(mockExec).not.toHaveBeenCalled();
     });
+
+    test("validates paths and keys before calling S3", async () => {
+        const s3 = await loadS3Cache();
+
+        await expect(s3.restoreCache([], "key")).rejects.toThrow(
+            "Path Validation Error: At least one directory or file path is required"
+        );
+        await expect(
+            s3.restoreCache(["/tmp/cached-dir"], "a,b")
+        ).rejects.toThrow("Key Validation Error: a,b cannot contain commas.");
+        const longKey = "a".repeat(513);
+        await expect(
+            s3.restoreCache(["/tmp/cached-dir"], longKey)
+        ).rejects.toThrow(
+            `Key Validation Error: ${longKey} cannot be larger than 512 characters.`
+        );
+        const manyRestoreKeys = Array.from({ length: 10 }, (_, i) => `k${i}`);
+        await expect(
+            s3.restoreCache(["/tmp/cached-dir"], "primary", manyRestoreKeys)
+        ).rejects.toThrow(
+            "Key Validation Error: Keys are limited to a maximum of 10."
+        );
+    });
+
+    test("isolates Windows cache version unless enableCrossOsArchive is true", async () => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(
+            process,
+            "platform"
+        );
+        Object.defineProperty(process, "platform", { value: "win32" });
+
+        try {
+            const s3 = await loadS3Cache();
+
+            mockSend.mockClear();
+            await s3.restoreCache(
+                ["/tmp/cached-dir"],
+                "key",
+                [],
+                { lookupOnly: true },
+                false
+            );
+            const winPrefix = mockSend.mock.calls[0][0].input.Prefix;
+
+            mockSend.mockClear();
+            await s3.restoreCache(
+                ["/tmp/cached-dir"],
+                "key",
+                [],
+                { lookupOnly: true },
+                true
+            );
+            const crossOsPrefix = mockSend.mock.calls[0][0].input.Prefix;
+
+            expect(winPrefix).not.toBe(crossOsPrefix);
+        } finally {
+            if (originalPlatform) {
+                Object.defineProperty(process, "platform", originalPlatform);
+            }
+        }
+    });
 });

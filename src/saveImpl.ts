@@ -64,7 +64,11 @@ export async function saveImpl(
         );
 
         if (s3Cache.isS3Available()) {
-            await s3Cache.saveCache(cachePaths, primaryKey);
+            await s3Cache.saveCache(
+                cachePaths,
+                primaryKey,
+                enableCrossOsArchive
+            );
             cacheId = 1;
         } else {
             cacheId = await cache.saveCache(

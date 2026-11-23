@@ -44,9 +44,15 @@ export async function restoreImpl(
         const lookupOnly = utils.getInputAsBool(Inputs.LookupOnly);
 
         const cacheKey = s3Cache.isS3Available()
-            ? await s3Cache.restoreCache(cachePaths, primaryKey, restoreKeys, {
-                  lookupOnly: lookupOnly
-              })
+            ? await s3Cache.restoreCache(
+                  cachePaths,
+                  primaryKey,
+                  restoreKeys,
+                  {
+                      lookupOnly: lookupOnly
+                  },
+                  enableCrossOsArchive
+              )
             : await cache.restoreCache(
                   cachePaths,
                   primaryKey,

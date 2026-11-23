@@ -41,16 +41,49 @@ async function getCompression(): Promise<Compression> {
     }
 }
 
-function cacheVersion(paths: string[], compression: Compression): string {
+function checkPaths(paths: string[]): void {
+    if (!paths || paths.length === 0) {
+        throw new Error(
+            "Path Validation Error: At least one directory or file path is required"
+        );
+    }
+}
+
+function checkKey(key: string): void {
+    if (key.length > 512) {
+        throw new Error(
+            `Key Validation Error: ${key} cannot be larger than 512 characters.`
+        );
+    }
+    const regex = /^[^,]*$/;
+    if (!regex.test(key)) {
+        throw new Error(`Key Validation Error: ${key} cannot contain commas.`);
+    }
+}
+
+function cacheVersion(
+    paths: string[],
+    compression: Compression,
+    enableCrossOsArchive = false
+): string {
+    const components = [...paths, compression];
+    if (process.platform === "win32" && !enableCrossOsArchive) {
+        components.push("windows-only");
+    }
+    components.push("1.1");
     return crypto
         .createHash("sha256")
-        .update([...paths, compression, "1.1"].join("|"))
+        .update(components.join("|"))
         .digest("hex");
 }
 
-function s3Prefix(paths: string[], compression: Compression): string {
+function s3Prefix(
+    paths: string[],
+    compression: Compression,
+    enableCrossOsArchive = false
+): string {
     const repo = process.env["GITHUB_REPOSITORY"];
-    const version = cacheVersion(paths, compression);
+    const version = cacheVersion(paths, compression, enableCrossOsArchive);
     return `cache/${repo}/${version}/`;
 }
 
@@ -128,15 +161,26 @@ export async function restoreCache(
     paths: string[],
     primaryKey: string,
     restoreKeys: string[] = [],
-    options?: { lookupOnly?: boolean }
+    options?: { lookupOnly?: boolean },
+    enableCrossOsArchive = false
 ): Promise<string | undefined> {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
 
-    const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression);
+    checkPaths(paths);
     const keys = [primaryKey, ...restoreKeys];
+    if (keys.length > 10) {
+        throw new Error(
+            "Key Validation Error: Keys are limited to a maximum of 10."
+        );
+    }
+    for (const key of keys) {
+        checkKey(key);
+    }
+
+    const compression = await getCompression();
+    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
 
     let matchedKey: string | undefined;
     let s3Key: string | undefined;
@@ -204,13 +248,20 @@ export async function restoreCache(
     }
 }
 
-export async function saveCache(paths: string[], key: string): Promise<void> {
+export async function saveCache(
+    paths: string[],
+    key: string,
+    enableCrossOsArchive = false
+): Promise<void> {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
 
+    checkPaths(paths);
+    checkKey(key);
+
     const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression);
+    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
     const s3Key = `${prefix}${key}`;
 
     const resolved = await resolvePaths(paths);

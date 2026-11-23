@@ -381,9 +381,15 @@ test("restore with S3 available and AC unavailable still restores from S3", asyn
 
     await restoreImpl(new StateProvider());
 
-    expect(s3Cache.restoreCache).toHaveBeenCalledWith([path], key, [], {
-        lookupOnly: false
-    });
+    expect(s3Cache.restoreCache).toHaveBeenCalledWith(
+        [path],
+        key,
+        [],
+        {
+            lookupOnly: false
+        },
+        false
+    );
     expect(cache.restoreCache).not.toHaveBeenCalled();
     expect(core.setOutput).toHaveBeenCalledWith("cache-hit", "true");
 });
@@ -402,9 +408,15 @@ test("restore with S3 available passes lookupOnly option", async () => {
 
     await restoreImpl(new StateProvider());
 
-    expect(s3Cache.restoreCache).toHaveBeenCalledWith([path], key, [], {
-        lookupOnly: true
-    });
+    expect(s3Cache.restoreCache).toHaveBeenCalledWith(
+        [path],
+        key,
+        [],
+        {
+            lookupOnly: true
+        },
+        false
+    );
     expect(core.setOutput).toHaveBeenCalledWith("cache-hit", "true");
     expect(core.info).toHaveBeenCalledWith(
         `Cache found and can be restored from key: ${key}`
