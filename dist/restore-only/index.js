@@ -132714,6 +132714,8 @@ const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.ur
 const DEFAULT_QUEUE_SIZE = 4;
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
 const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 2_147_483_647; // 32-bit signed int max for Node's setTimeout
 const MAX_DOWNLOAD_RETRIES = 3;
 function unsetAmbientAwsCredentials(env) {
     if (env["CACHE_S3_UNSET_AWS_CREDENTIALS"] === "true") {
@@ -132722,7 +132724,7 @@ function unsetAmbientAwsCredentials(env) {
         delete env["AWS_SESSION_TOKEN"];
     }
 }
-function parsePositiveInt(name, raw, fallback, minValue = 1) {
+function parsePositiveInt(name, raw, fallback, minValue = 1, maxValue = Number.MAX_SAFE_INTEGER) {
     const trimmed = raw?.trim();
     if (!trimmed) {
         return fallback;
@@ -132730,8 +132732,13 @@ function parsePositiveInt(name, raw, fallback, minValue = 1) {
     const parsed = Number(trimmed);
     if (!/^\d+$/.test(trimmed) ||
         !Number.isSafeInteger(parsed) ||
-        parsed < minValue) {
-        const requirement = minValue > 1 ? `an integer >= ${minValue}` : "a positive integer";
+        parsed < minValue ||
+        parsed > maxValue) {
+        const requirement = maxValue < Number.MAX_SAFE_INTEGER
+            ? `an integer between ${minValue} and ${maxValue}`
+            : minValue > 1
+                ? `an integer >= ${minValue}`
+                : "a positive integer";
         warning(`Invalid ${name}="${raw}"; expected ${requirement}. Falling back to ${fallback}.`);
         return fallback;
     }
@@ -132765,7 +132772,8 @@ const tuningConfig = {
     uploadQueueSize: parsePositiveInt("CACHE_S3_UPLOAD_QUEUE_SIZE", process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"], DEFAULT_QUEUE_SIZE),
     uploadPartSize: parsePositiveInt("CACHE_S3_UPLOAD_PART_SIZE", process.env["CACHE_S3_UPLOAD_PART_SIZE"], DEFAULT_PART_SIZE, MIN_UPLOAD_PART_SIZE),
     downloadQueueSize: parsePositiveInt("CACHE_S3_DOWNLOAD_QUEUE_SIZE", process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"], DEFAULT_QUEUE_SIZE),
-    downloadPartSize: parsePositiveInt("CACHE_S3_DOWNLOAD_PART_SIZE", process.env["CACHE_S3_DOWNLOAD_PART_SIZE"], DEFAULT_PART_SIZE)
+    downloadPartSize: parsePositiveInt("CACHE_S3_DOWNLOAD_PART_SIZE", process.env["CACHE_S3_DOWNLOAD_PART_SIZE"], DEFAULT_PART_SIZE),
+    downloadTimeoutMs: parsePositiveInt("CACHE_S3_DOWNLOAD_TIMEOUT_MS", process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"], DEFAULT_DOWNLOAD_TIMEOUT_MS, 1, MAX_TIMEOUT_MS)
 };
 const s3Client = new dist_cjs.S3Client({
     region,
@@ -132887,20 +132895,27 @@ function s3Cache_sleep(ms) {
 async function downloadSingleWithRetry(s3Key, archivePath, expectedSize) {
     for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
         try {
-            const { Body, ContentLength } = await s3Client.send(new dist_cjs.GetObjectCommand({ Bucket: bucketName, Key: s3Key }));
-            if (!Body) {
-                throw new Error("Empty response body from S3");
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(new Error(`Download timed out after ${tuningConfig.downloadTimeoutMs}ms`)), tuningConfig.downloadTimeoutMs);
+            try {
+                const { Body, ContentLength } = await s3Client.send(new dist_cjs.GetObjectCommand({ Bucket: bucketName, Key: s3Key }), { abortSignal: controller.signal });
+                if (!Body) {
+                    throw new Error("Empty response body from S3");
+                }
+                await (0,promises_namespaceObject.pipeline)(Body, external_fs_namespaceObject.createWriteStream(archivePath), { signal: controller.signal });
+                const downloadedSize = external_fs_namespaceObject.statSync(archivePath).size;
+                if (downloadedSize <= 0) {
+                    throw new Error("Downloaded cache archive is empty (0 bytes)");
+                }
+                const targetSize = expectedSize ?? ContentLength;
+                if (targetSize !== undefined && downloadedSize !== targetSize) {
+                    throw new Error(`Downloaded size mismatch: expected ${targetSize} bytes, got ${downloadedSize} bytes`);
+                }
+                return downloadedSize;
             }
-            await (0,promises_namespaceObject.pipeline)(Body, external_fs_namespaceObject.createWriteStream(archivePath));
-            const downloadedSize = external_fs_namespaceObject.statSync(archivePath).size;
-            if (downloadedSize <= 0) {
-                throw new Error("Downloaded cache archive is empty (0 bytes)");
+            finally {
+                clearTimeout(timeoutId);
             }
-            const targetSize = expectedSize ?? ContentLength;
-            if (targetSize !== undefined && downloadedSize !== targetSize) {
-                throw new Error(`Downloaded size mismatch: expected ${targetSize} bytes, got ${downloadedSize} bytes`);
-            }
-            return downloadedSize;
         }
         catch (err) {
             if (attempt >= MAX_DOWNLOAD_RETRIES) {
@@ -132916,35 +132931,88 @@ async function downloadRangeWithRetry(s3Key, range, fileHandle) {
     const expectedContentRangePrefix = `bytes ${range.start}-${range.end}/`;
     for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
         try {
-            const { Body, ContentRange } = await s3Client.send(new dist_cjs.GetObjectCommand({
-                Bucket: bucketName,
-                Key: s3Key,
-                Range: `bytes=${range.start}-${range.end}`
-            }));
-            if (!Body) {
-                throw new Error(`Empty response body for range ${range.start}-${range.end}`);
-            }
-            if (ContentRange !== undefined &&
-                !ContentRange.startsWith(expectedContentRangePrefix)) {
-                throw new Error(`Range ${range.start}-${range.end} Content-Range mismatch: got "${ContentRange}"`);
-            }
-            let bytesWritten = 0;
-            for await (const chunk of Body) {
-                const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-                if (bytesWritten + buf.length > expectedLength) {
-                    throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, received > ${expectedLength} bytes`);
+            const controller = new AbortController();
+            let bodyStream;
+            let consumingStream = false;
+            const abortReason = () => controller.signal.reason instanceof Error
+                ? controller.signal.reason
+                : new Error(`Download timed out after ${tuningConfig.downloadTimeoutMs}ms`);
+            const safelyDestroyStream = (stream, err) => {
+                if (!stream || typeof stream.destroy !== "function") {
+                    return;
                 }
-                let chunkOffset = 0;
-                while (chunkOffset < buf.length) {
-                    const { bytesWritten: written } = await fileHandle.write(buf, chunkOffset, buf.length - chunkOffset, range.start + bytesWritten);
-                    bytesWritten += written;
-                    chunkOffset += written;
+                if (!consumingStream) {
+                    stream.on?.("error", () => undefined);
+                    stream.destroy();
+                }
+                else {
+                    stream.destroy(err);
+                }
+            };
+            const onAbort = () => {
+                safelyDestroyStream(bodyStream, abortReason());
+            };
+            controller.signal.addEventListener("abort", onAbort, {
+                once: true
+            });
+            const timeoutId = setTimeout(() => controller.abort(new Error(`Download timed out after ${tuningConfig.downloadTimeoutMs}ms`)), tuningConfig.downloadTimeoutMs);
+            try {
+                const { Body, ContentRange } = await s3Client.send(new dist_cjs.GetObjectCommand({
+                    Bucket: bucketName,
+                    Key: s3Key,
+                    Range: `bytes=${range.start}-${range.end}`
+                }), { abortSignal: controller.signal });
+                if (!Body) {
+                    throw new Error(`Empty response body for range ${range.start}-${range.end}`);
+                }
+                bodyStream = Body;
+                if (controller.signal.aborted) {
+                    safelyDestroyStream(bodyStream);
+                    throw abortReason();
+                }
+                if (ContentRange !== undefined &&
+                    !ContentRange.startsWith(expectedContentRangePrefix)) {
+                    throw new Error(`Range ${range.start}-${range.end} Content-Range mismatch: got "${ContentRange}"`);
+                }
+                let bytesWritten = 0;
+                consumingStream = true;
+                try {
+                    for await (const chunk of bodyStream) {
+                        if (controller.signal.aborted) {
+                            throw abortReason();
+                        }
+                        const buf = Buffer.isBuffer(chunk)
+                            ? chunk
+                            : Buffer.from(chunk);
+                        if (bytesWritten + buf.length > expectedLength) {
+                            throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, received > ${expectedLength} bytes`);
+                        }
+                        let chunkOffset = 0;
+                        while (chunkOffset < buf.length) {
+                            const { bytesWritten: written } = await fileHandle.write(buf, chunkOffset, buf.length - chunkOffset, range.start + bytesWritten);
+                            bytesWritten += written;
+                            chunkOffset += written;
+                        }
+                    }
+                }
+                finally {
+                    consumingStream = false;
+                }
+                if (controller.signal.aborted) {
+                    throw abortReason();
+                }
+                if (bytesWritten !== expectedLength) {
+                    throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, got ${bytesWritten} bytes`);
+                }
+                return;
+            }
+            finally {
+                clearTimeout(timeoutId);
+                controller.signal.removeEventListener("abort", onAbort);
+                if (bodyStream && !bodyStream.destroyed) {
+                    safelyDestroyStream(bodyStream);
                 }
             }
-            if (bytesWritten !== expectedLength) {
-                throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, got ${bytesWritten} bytes`);
-            }
-            return;
         }
         catch (err) {
             if (attempt >= MAX_DOWNLOAD_RETRIES) {

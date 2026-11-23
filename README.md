@@ -18,6 +18,7 @@ If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub ca
 | `CACHE_S3_UPLOAD_PART_SIZE`      | Upload part size in bytes (default: `33554432`, 32 MiB; minimum: `5242880`, 5 MiB)                                                               |
 | `CACHE_S3_DOWNLOAD_QUEUE_SIZE`   | Number of concurrent `Range` download parts (default: `4`)                                                                                       |
 | `CACHE_S3_DOWNLOAD_PART_SIZE`    | Download part size in bytes for `Range` requests (default: `33554432`, 32 MiB)                                                                   |
+| `CACHE_S3_DOWNLOAD_TIMEOUT_MS`   | Per-attempt download timeout in milliseconds (default: `30000`, max: `2147483647`)                                                               |
 
 AWS credentials are resolved via the standard SDK credential chain (env vars, instance profile, etc.).
 
