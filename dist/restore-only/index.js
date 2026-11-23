@@ -132715,6 +132715,13 @@ const DEFAULT_QUEUE_SIZE = 4;
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
 const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
 const MAX_DOWNLOAD_RETRIES = 3;
+function unsetAmbientAwsCredentials(env) {
+    if (env["CACHE_S3_UNSET_AWS_CREDENTIALS"] === "true") {
+        delete env["AWS_ACCESS_KEY_ID"];
+        delete env["AWS_SECRET_ACCESS_KEY"];
+        delete env["AWS_SESSION_TOKEN"];
+    }
+}
 function parsePositiveInt(name, raw, fallback, minValue = 1) {
     const trimmed = raw?.trim();
     if (!trimmed) {
@@ -132744,9 +132751,13 @@ function computeByteRanges(totalSize, partSize) {
     return ranges;
 }
 const bucketName = process.env["CACHE_S3_BUCKET"];
+if (bucketName) {
+    unsetAmbientAwsCredentials(process.env);
+}
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
 const endpoint = process.env["CACHE_S3_ENDPOINT"];
-const forcePathStyle = process.env["CACHE_S3_FORCE_PATH_STYLE"] === "true";
+const forcePathStyle = (process.env["CACHE_S3_FORCE_PATH_STYLE"] ||
+    process.env["AWS_S3_FORCE_PATH_STYLE"]) === "true";
 const tuningConfig = {
     prefix: (process.env["CACHE_S3_PREFIX"] ?? "")
         .trim()
