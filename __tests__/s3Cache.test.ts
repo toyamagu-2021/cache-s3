@@ -19,7 +19,9 @@ const mockGlobCreate =
         ) => Promise<{ glob: () => Promise<string[]> }>
     >();
 const mockSend =
-    jest.fn<(command: { input: Record<string, string> }) => Promise<unknown>>();
+    jest.fn<
+        (command: { input: Record<string, unknown> }) => Promise<unknown>
+    >();
 const mockUploadDone = jest.fn<() => Promise<void>>();
 const mockUpload = jest.fn<
     (options: {
@@ -359,6 +361,227 @@ describe("restoreCache", () => {
                 Object.defineProperty(process, "platform", originalPlatform);
             }
         }
+    });
+
+    test("rejects 0-byte object from S3 listing without downloading or extracting", async () => {
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 0
+                            }
+                        ]
+                    };
+                }
+                throw new Error("GetObjectCommand should not be called");
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        expect(mockSend).toHaveBeenCalledTimes(1);
+        expect(mockExec).not.toHaveBeenCalled();
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("0 bytes")
+        );
+    });
+
+    test("rejects empty downloaded stream and returns undefined after retries", async () => {
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date()
+                            }
+                        ]
+                    };
+                }
+                return { Body: Readable.from([]) };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        // 1 ListObjectsV2 + 3 GetObject attempts
+        expect(mockSend).toHaveBeenCalledTimes(4);
+        expect(mockExec).not.toHaveBeenCalled();
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("0 bytes")
+        );
+    });
+
+    test("retries truncated single-object download and succeeds when full size arrives", async () => {
+        let getAttempts = 0;
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                getAttempts++;
+                if (getAttempts === 1) {
+                    return { Body: Readable.from(["arc"]) };
+                }
+                return { Body: Readable.from(["archive"]) };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(getAttempts).toBe(2);
+        expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    test("returns undefined when single-object download fails size check across all retries", async () => {
+        let getAttempts = 0;
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                getAttempts++;
+                return { Body: Readable.from(["arc"]) };
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        expect(getAttempts).toBe(3);
+        expect(mockExec).not.toHaveBeenCalled();
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("size mismatch")
+        );
+    });
+
+    test("downloads large objects via concurrent Range requests, respects queue size, reassembles bytes, and retries only failed or oversized segments without corrupting adjacent ranges", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "2";
+
+        const fullPayload = Buffer.from("0123456789");
+        const rangeCalls: Record<string, number> = {};
+        let inFlight = 0;
+        let maxInFlight = 0;
+        let restoredBytes: Buffer | undefined;
+
+        mockSend.mockImplementation(
+            async (command: { input: Record<string, unknown> }) => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: command.input.Prefix,
+                                LastModified: new Date(),
+                                Size: fullPayload.length
+                            }
+                        ]
+                    };
+                }
+                const rangeHeader = command.input.Range as string;
+                rangeCalls[rangeHeader] = (rangeCalls[rangeHeader] ?? 0) + 1;
+
+                inFlight++;
+                maxInFlight = Math.max(maxInFlight, inFlight);
+                await new Promise(resolve => setTimeout(resolve, 10));
+                inFlight--;
+
+                // First segment returns oversized full body on attempt 1 (e.g. proxy ignoring Range)
+                if (
+                    rangeHeader === "bytes=0-3" &&
+                    rangeCalls[rangeHeader] === 1
+                ) {
+                    return {
+                        Body: Readable.from([Buffer.from("0123CORRUPT")])
+                    };
+                }
+
+                // Middle segment fails with mismatched ContentRange on attempt 1
+                if (
+                    rangeHeader === "bytes=4-7" &&
+                    rangeCalls[rangeHeader] === 1
+                ) {
+                    return {
+                        ContentRange: "bytes 0-3/10",
+                        Body: Readable.from([Buffer.from("0123")])
+                    };
+                }
+
+                // Last segment returns extra tail bytes on attempt 1
+                if (
+                    rangeHeader === "bytes=8-9" &&
+                    rangeCalls[rangeHeader] === 1
+                ) {
+                    return {
+                        Body: Readable.from([Buffer.from("89EXTRA")])
+                    };
+                }
+
+                const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+                expect(match).not.toBeNull();
+                const start = Number(match![1]);
+                const end = Number(match![2]);
+                return {
+                    ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                    Body: Readable.from([fullPayload.subarray(start, end + 1)])
+                };
+            }
+        );
+
+        mockExec.mockImplementation(
+            async (_tool: string, args: string[] = []) => {
+                const xfIdx = args.findIndex(arg => /^-x[z]?f$/.test(arg));
+                if (xfIdx !== -1) {
+                    restoredBytes = await fs.promises.readFile(args[xfIdx + 1]);
+                }
+                return 0;
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(maxInFlight).toBeLessThanOrEqual(2);
+        expect(rangeCalls).toEqual({
+            "bytes=0-3": 2,
+            "bytes=4-7": 2,
+            "bytes=8-9": 2
+        });
+        expect(restoredBytes?.toString()).toBe("0123456789");
     });
 });
 
