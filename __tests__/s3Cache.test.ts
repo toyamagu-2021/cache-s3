@@ -35,10 +35,15 @@ const mockUploadOn =
     >();
 const mockUpload = jest.fn<
     (options: {
-        params: { Key: string };
+        params: {
+            Bucket?: string;
+            Key: string;
+            IfNoneMatch?: string;
+        };
         partSize: number;
         queueSize: number;
     }) => {
+        uploadId?: string;
         on: typeof mockUploadOn;
         done: () => Promise<void>;
     }
@@ -64,6 +69,7 @@ const mockS3Client = jest.fn<
 
 jest.unstable_mockModule("@aws-sdk/client-s3", () => ({
     S3Client: mockS3Client,
+    AbortMultipartUploadCommand: jest.fn(input => ({ input })),
     ListObjectsV2Command: jest.fn(input => ({ input })),
     GetObjectCommand: jest.fn(input => ({ input }))
 }));
@@ -106,16 +112,21 @@ beforeEach(() => {
     mockGlobCreate.mockResolvedValue({
         glob: async () => ["/tmp/cached-dir"]
     });
+    mockUploadDone.mockReset();
     mockUploadDone.mockResolvedValue(undefined);
     mockUploadOn.mockReset();
-    mockUpload.mockClear();
+    mockUpload.mockReset();
+    mockUpload.mockImplementation(() => ({
+        on: mockUploadOn,
+        done: mockUploadDone
+    }));
     mockS3Client.mockClear();
     mockWarning.mockClear();
     mockInfo.mockClear();
     mockDebug.mockClear();
     mockIsDebug.mockReset();
     mockIsDebug.mockReturnValue(false);
-    mockSend.mockClear();
+    mockSend.mockReset();
     mockExec.mockClear();
 
     // exec is mocked, so the archive that saveCache stats and uploads has to
@@ -235,6 +246,203 @@ describe("saveCache", () => {
                 Object.defineProperty(process, "platform", originalPlatform);
             }
         }
+    });
+
+    test("passes IfNoneMatch: '*' in Upload params and resolves to 1 on successful save", async () => {
+        const result: unknown = await (
+            await loadS3Cache()
+        ).saveCache(["/tmp/cached-dir"], "key");
+
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        expect(mockUpload.mock.calls[0][0].params.IfNoneMatch).toBe("*");
+        expect(mockInfo).toHaveBeenCalledWith("Cache saved successfully");
+        expect(result).toBe(1);
+    });
+
+    test.each([
+        [
+            "name PreconditionFailed",
+            Object.assign(
+                new Error(
+                    "At least one of the pre-conditions you specified did not hold"
+                ),
+                { name: "PreconditionFailed" }
+            )
+        ],
+        [
+            "Code PreconditionFailed",
+            Object.assign(new Error("Precondition failed"), {
+                Code: "PreconditionFailed"
+            })
+        ],
+        [
+            "HTTP 412 status",
+            Object.assign(new Error("HTTP 412"), {
+                $metadata: { httpStatusCode: 412 }
+            })
+        ],
+        [
+            "name ConditionalRequestConflict",
+            Object.assign(
+                new Error(
+                    "At least one of the pre-conditions you specified did not hold"
+                ),
+                {
+                    name: "ConditionalRequestConflict",
+                    $metadata: { httpStatusCode: 409 }
+                }
+            )
+        ],
+        [
+            "Code ConditionalRequestConflict",
+            Object.assign(new Error("Conditional request conflict"), {
+                Code: "ConditionalRequestConflict",
+                $metadata: { httpStatusCode: 409 }
+            })
+        ]
+    ])(
+        "returns -1 and logs reservation conflict without aborting on single-part upload (%s)",
+        async (_label, error) => {
+            mockUploadDone.mockRejectedValueOnce(error);
+
+            const s3 = await loadS3Cache();
+            const { AbortMultipartUploadCommand } =
+                await import("@aws-sdk/client-s3");
+            const result: unknown = await s3.saveCache(
+                ["/tmp/cached-dir"],
+                "dup-key"
+            );
+
+            expect(result).toBe(-1);
+            expect(mockInfo).toHaveBeenCalledWith(
+                "Failed to save: Unable to reserve cache with key dup-key, another job may be creating this cache."
+            );
+            expect(mockInfo).not.toHaveBeenCalledWith(
+                "Cache saved successfully"
+            );
+            expect(AbortMultipartUploadCommand).not.toHaveBeenCalled();
+            expect(mockSend).not.toHaveBeenCalled();
+        }
+    );
+
+    test.each([
+        [
+            "HTTP 412 PreconditionFailed",
+            Object.assign(new Error("PreconditionFailed"), {
+                $metadata: { httpStatusCode: 412 }
+            })
+        ],
+        [
+            "name ConditionalRequestConflict",
+            Object.assign(new Error("ConditionalRequestConflict"), {
+                name: "ConditionalRequestConflict",
+                $metadata: { httpStatusCode: 409 }
+            })
+        ],
+        [
+            "Code ConditionalRequestConflict",
+            Object.assign(new Error("ConditionalRequestConflict"), {
+                Code: "ConditionalRequestConflict",
+                $metadata: { httpStatusCode: 409 }
+            })
+        ]
+    ])(
+        "aborts multipart upload on conditional write conflict (%s) and returns -1 even if abort rejects",
+        async (_label, error) => {
+            mockUpload.mockImplementationOnce(() => ({
+                uploadId: "mpu-123",
+                on: mockUploadOn,
+                done: mockUploadDone
+            }));
+            mockUploadDone.mockRejectedValueOnce(error);
+            mockSend.mockRejectedValueOnce(new Error("NoSuchUpload"));
+
+            const s3 = await loadS3Cache();
+            const { AbortMultipartUploadCommand } =
+                await import("@aws-sdk/client-s3");
+            const result: unknown = await s3.saveCache(
+                ["/tmp/cached-dir"],
+                "mpu-key"
+            );
+
+            const uploadedKey = mockUpload.mock.calls[0][0].params.Key;
+            expect(AbortMultipartUploadCommand).toHaveBeenCalledWith({
+                Bucket: "test-bucket",
+                Key: uploadedKey,
+                UploadId: "mpu-123"
+            });
+            expect(mockSend).toHaveBeenCalledWith({
+                input: {
+                    Bucket: "test-bucket",
+                    Key: uploadedKey,
+                    UploadId: "mpu-123"
+                }
+            });
+            expect(mockInfo).toHaveBeenCalledWith(
+                "Failed to save: Unable to reserve cache with key mpu-key, another job may be creating this cache."
+            );
+            expect(mockInfo).not.toHaveBeenCalledWith(
+                "Cache saved successfully"
+            );
+            expect(result).toBe(-1);
+        }
+    );
+
+    test("rethrows non-conflict upload errors (including unrelated 409) from saveCache", async () => {
+        const s3 = await loadS3Cache();
+
+        mockUploadDone.mockRejectedValueOnce(
+            Object.assign(new Error("Access Denied"), {
+                name: "AccessDenied",
+                $metadata: { httpStatusCode: 403 }
+            })
+        );
+        await expect(
+            s3.saveCache(["/tmp/cached-dir"], "forbidden-key")
+        ).rejects.toThrow("Access Denied");
+
+        mockUploadDone.mockRejectedValueOnce(
+            Object.assign(new Error("Internal Server Error"), {
+                name: "InternalError",
+                $metadata: { httpStatusCode: 500 }
+            })
+        );
+        await expect(
+            s3.saveCache(["/tmp/cached-dir"], "server-error-key")
+        ).rejects.toThrow("Internal Server Error");
+
+        mockUploadDone.mockRejectedValueOnce(
+            Object.assign(new Error("OperationAborted"), {
+                name: "OperationAborted",
+                Code: "OperationAborted",
+                $metadata: { httpStatusCode: 409 }
+            })
+        );
+        await expect(
+            s3.saveCache(["/tmp/cached-dir"], "operation-aborted-key")
+        ).rejects.toThrow("OperationAborted");
+
+        mockUpload.mockImplementationOnce(() => ({
+            uploadId: "mpu-409",
+            on: mockUploadOn,
+            done: mockUploadDone
+        }));
+        mockUploadDone.mockRejectedValueOnce(
+            Object.assign(new Error("InvalidBucketState"), {
+                name: "InvalidBucketState",
+                Code: "InvalidBucketState",
+                $metadata: { httpStatusCode: 409 }
+            })
+        );
+        await expect(
+            s3.saveCache(["/tmp/cached-dir"], "invalid-bucket-state-key")
+        ).rejects.toThrow("InvalidBucketState");
+
+        expect(mockInfo).not.toHaveBeenCalledWith(
+            expect.stringContaining("Unable to reserve cache")
+        );
+        expect(mockInfo).not.toHaveBeenCalledWith("Cache saved successfully");
+        expect(mockSend).not.toHaveBeenCalled();
     });
 });
 
