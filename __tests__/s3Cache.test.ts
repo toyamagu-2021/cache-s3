@@ -22,9 +22,19 @@ const mockSend =
     jest.fn<(command: { input: Record<string, string> }) => Promise<unknown>>();
 const mockUploadDone = jest.fn<() => Promise<void>>();
 const mockUpload = jest.fn<
-    (options: { params: { Key: string } }) => { done: () => Promise<void> }
+    (options: {
+        params: { Key: string };
+        partSize: number;
+        queueSize: number;
+    }) => { done: () => Promise<void> }
 >(() => ({ done: mockUploadDone }));
+const mockWarning = jest.fn<(message: string | Error) => void>();
+const mockInfo = jest.fn<(message: string) => void>();
 
+jest.unstable_mockModule("@actions/core", () => ({
+    warning: mockWarning,
+    info: mockInfo
+}));
 jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
 jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
 jest.unstable_mockModule("@actions/glob", () => ({ create: mockGlobCreate }));
@@ -74,6 +84,11 @@ beforeEach(() => {
         glob: async () => ["/tmp/cached-dir"]
     });
     mockUploadDone.mockResolvedValue(undefined);
+    mockUpload.mockClear();
+    mockWarning.mockClear();
+    mockInfo.mockClear();
+    mockSend.mockClear();
+    mockExec.mockClear();
 
     // exec is mocked, so the archive that saveCache stats and uploads has to
     // be faked here.
@@ -90,6 +105,11 @@ afterEach(() => {
     delete process.env["CACHE_S3_BUCKET"];
     delete process.env["AWS_REGION"];
     delete process.env["GITHUB_REPOSITORY"];
+    delete process.env["CACHE_S3_PREFIX"];
+    delete process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"];
+    delete process.env["CACHE_S3_UPLOAD_PART_SIZE"];
+    delete process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"];
+    delete process.env["CACHE_S3_DOWNLOAD_PART_SIZE"];
 });
 
 describe("saveCache", () => {
@@ -339,5 +359,55 @@ describe("restoreCache", () => {
                 Object.defineProperty(process, "platform", originalPlatform);
             }
         }
+    });
+});
+
+describe("S3 prefix and tuning configuration", () => {
+    test("CACHE_S3_PREFIX overrides cache/<repo>/ while preserving <version>/ and trimming slashes", async () => {
+        process.env["CACHE_S3_PREFIX"] = "/custom/prefix///";
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        const uploadedKey = mockUpload.mock.calls[0][0].params.Key;
+        expect(uploadedKey).toMatch(/^custom\/prefix\/[0-9a-f]{64}\/my-key$/);
+    });
+
+    test("whitespace or slash-only CACHE_S3_PREFIX falls back to cache/<repo>/", async () => {
+        process.env["CACHE_S3_PREFIX"] = "  ///  ";
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        const uploadedKey = mockUpload.mock.calls[0][0].params.Key;
+        expect(uploadedKey).toMatch(
+            /^cache\/owner\/repo\/[0-9a-f]{64}\/my-key$/
+        );
+    });
+
+    test("passes CACHE_S3_UPLOAD_QUEUE_SIZE and CACHE_S3_UPLOAD_PART_SIZE to Upload", async () => {
+        process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"] = "8";
+        process.env["CACHE_S3_UPLOAD_PART_SIZE"] = "5242880";
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        expect(mockUpload.mock.calls[0][0].queueSize).toBe(8);
+        expect(mockUpload.mock.calls[0][0].partSize).toBe(5242880);
+        expect(mockWarning).not.toHaveBeenCalled();
+    });
+
+    test("invalid tuning env vars (including <5MiB upload part size, hex, scientific, or unsafe ints) warn and fall back to defaults", async () => {
+        process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"] = "0x10";
+        process.env["CACHE_S3_UPLOAD_PART_SIZE"] = "1048576";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "99999999999999999999";
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "1e7";
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockWarning).toHaveBeenCalledTimes(4);
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        expect(mockUpload.mock.calls[0][0].queueSize).toBe(4);
+        expect(mockUpload.mock.calls[0][0].partSize).toBe(32 * 1024 * 1024);
     });
 });

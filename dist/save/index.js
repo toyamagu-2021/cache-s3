@@ -132722,10 +132722,39 @@ const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.ur
 
 
 
+const DEFAULT_QUEUE_SIZE = 4;
+const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
+const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
+function parsePositiveInt(name, raw, fallback, minValue = 1) {
+    const trimmed = raw?.trim();
+    if (!trimmed) {
+        return fallback;
+    }
+    const parsed = Number(trimmed);
+    if (!/^\d+$/.test(trimmed) ||
+        !Number.isSafeInteger(parsed) ||
+        parsed < minValue) {
+        const requirement = minValue > 1
+            ? `an integer >= ${minValue}`
+            : "a positive integer";
+        warning(`Invalid ${name}="${raw}"; expected ${requirement}. Falling back to ${fallback}.`);
+        return fallback;
+    }
+    return parsed;
+}
 const bucketName = process.env["CACHE_S3_BUCKET"];
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
 const endpoint = process.env["CACHE_S3_ENDPOINT"];
 const forcePathStyle = process.env["CACHE_S3_FORCE_PATH_STYLE"] === "true";
+const tuningConfig = {
+    prefix: (process.env["CACHE_S3_PREFIX"] ?? "")
+        .trim()
+        .replace(/^\/+|\/+$/g, ""),
+    uploadQueueSize: parsePositiveInt("CACHE_S3_UPLOAD_QUEUE_SIZE", process.env["CACHE_S3_UPLOAD_QUEUE_SIZE"], DEFAULT_QUEUE_SIZE),
+    uploadPartSize: parsePositiveInt("CACHE_S3_UPLOAD_PART_SIZE", process.env["CACHE_S3_UPLOAD_PART_SIZE"], DEFAULT_PART_SIZE, MIN_UPLOAD_PART_SIZE),
+    downloadQueueSize: parsePositiveInt("CACHE_S3_DOWNLOAD_QUEUE_SIZE", process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"], DEFAULT_QUEUE_SIZE),
+    downloadPartSize: parsePositiveInt("CACHE_S3_DOWNLOAD_PART_SIZE", process.env["CACHE_S3_DOWNLOAD_PART_SIZE"], DEFAULT_PART_SIZE)
+};
 const s3Client = new dist_cjs.S3Client({
     region,
     ...(endpoint ? { endpoint } : {}),
@@ -132771,8 +132800,11 @@ function cacheVersion(paths, compression, enableCrossOsArchive = false) {
         .digest("hex");
 }
 function s3Prefix(paths, compression, enableCrossOsArchive = false) {
-    const repo = process.env["GITHUB_REPOSITORY"];
     const version = cacheVersion(paths, compression, enableCrossOsArchive);
+    if (tuningConfig.prefix) {
+        return `${tuningConfig.prefix}/${version}/`;
+    }
+    const repo = process.env["GITHUB_REPOSITORY"];
     return `cache/${repo}/${version}/`;
 }
 async function createTempDir() {
@@ -132930,8 +132962,8 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
                 Key: s3Key,
                 Body: external_fs_namespaceObject.createReadStream(archivePath)
             },
-            partSize: 32 * 1024 * 1024,
-            queueSize: 4
+            partSize: tuningConfig.uploadPartSize,
+            queueSize: tuningConfig.uploadQueueSize
         });
         await upload.done();
         info("Cache saved successfully");
