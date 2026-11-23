@@ -51,9 +51,7 @@ export function parsePositiveInt(
         parsed < minValue
     ) {
         const requirement =
-            minValue > 1
-                ? `an integer >= ${minValue}`
-                : "a positive integer";
+            minValue > 1 ? `an integer >= ${minValue}` : "a positive integer";
         core.warning(
             `Invalid ${name}="${raw}"; expected ${requirement}. Falling back to ${fallback}.`
         );
