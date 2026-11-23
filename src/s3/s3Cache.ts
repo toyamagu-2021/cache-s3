@@ -347,6 +347,26 @@ async function extractArchive(
     }
 }
 
+async function listArchive(
+    archivePath: string,
+    compression: Compression
+): Promise<void> {
+    try {
+        if (compression === "zstd") {
+            await exec.exec("tar", [
+                "--use-compress-program",
+                await zstdDecompressProgram(),
+                "-tf",
+                archivePath
+            ]);
+        } else {
+            await exec.exec("tar", ["-tzf", archivePath]);
+        }
+    } catch (err) {
+        core.debug(`Failed to list archive: ${(err as Error).message}`);
+    }
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -611,6 +631,7 @@ export async function restoreCache(
     for (const key of keys) {
         checkKey(key);
     }
+    core.debug(`Resolved Keys: ${JSON.stringify(keys)}`);
 
     const compression = await getCompression();
     const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
@@ -654,6 +675,7 @@ export async function restoreCache(
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
+    core.debug(`Archive Path: ${archivePath}`);
 
     try {
         if (objectSize === 0) {
@@ -669,6 +691,10 @@ export async function restoreCache(
         core.info(
             `Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`
         );
+
+        if (core.isDebug()) {
+            await listArchive(archivePath, compression);
+        }
 
         await extractArchive(archivePath, compression);
         core.info("Cache restored successfully");
@@ -705,13 +731,19 @@ export async function saveCache(
             `Path Validation Error: Path(s) ${paths.join(", ")} do not exist.`
         );
     }
+    core.debug(`Cache Paths: ${JSON.stringify(resolved)}`);
 
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
+    core.debug(`Archive Path: ${archivePath}`);
 
     try {
         await createArchive(archivePath, resolved, compression);
+
+        if (core.isDebug()) {
+            await listArchive(archivePath, compression);
+        }
 
         const size = fs.statSync(archivePath).size;
         core.info(
