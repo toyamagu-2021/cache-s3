@@ -151,6 +151,7 @@ async function runS3Server(port, storageDir, pidFile) {
                 bucket,
                 key,
                 query,
+                range: req.headers.range || null,
                 size: body.length
             });
 
@@ -325,9 +326,36 @@ async function runS3Server(port, storageDir, pidFile) {
                 }
                 const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
                 const data = fs.readFileSync(dataPath);
+                const rangeHeader = req.headers.range;
+                if (req.method === "GET" && typeof rangeHeader === "string") {
+                    const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader.trim());
+                    if (match) {
+                        const start = Number(match[1]);
+                        const end = match[2] !== "" ? Number(match[2]) : data.length - 1;
+                        if (start >= 0 && end >= start && end < data.length) {
+                            const slice = data.subarray(start, end + 1);
+                            res.writeHead(206, {
+                                "content-type": "application/octet-stream",
+                                "content-length": String(slice.length),
+                                "content-range": `bytes ${start}-${end}/${data.length}`,
+                                "accept-ranges": "bytes",
+                                ETag: `"${meta.etag}"`,
+                                "Last-Modified": new Date(meta.lastModified).toUTCString()
+                            });
+                            res.end(slice);
+                            return;
+                        }
+                    }
+                    res.writeHead(416, {
+                        "content-range": `bytes */${data.length}`
+                    });
+                    res.end();
+                    return;
+                }
                 res.writeHead(200, {
                     "content-type": "application/octet-stream",
                     "content-length": String(data.length),
+                    "accept-ranges": "bytes",
                     ETag: `"${meta.etag}"`,
                     "Last-Modified": new Date(meta.lastModified).toUTCString()
                 });

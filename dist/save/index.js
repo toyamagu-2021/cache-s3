@@ -132725,6 +132725,7 @@ const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.ur
 const DEFAULT_QUEUE_SIZE = 4;
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
 const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
+const MAX_DOWNLOAD_RETRIES = 3;
 function parsePositiveInt(name, raw, fallback, minValue = 1) {
     const trimmed = raw?.trim();
     if (!trimmed) {
@@ -132741,6 +132742,19 @@ function parsePositiveInt(name, raw, fallback, minValue = 1) {
         return fallback;
     }
     return parsed;
+}
+function computeByteRanges(totalSize, partSize) {
+    if (totalSize <= 0 || partSize <= 0) {
+        return [];
+    }
+    const ranges = [];
+    let index = 0;
+    for (let start = 0; start < totalSize; start += partSize) {
+        const end = Math.min(start + partSize - 1, totalSize - 1);
+        ranges.push({ index, start, end });
+        index++;
+    }
+    return ranges;
 }
 const bucketName = process.env["CACHE_S3_BUCKET"];
 const region = process.env["AWS_REGION"] || process.env["AWS_DEFAULT_REGION"];
@@ -132869,6 +132883,102 @@ async function extractArchive(archivePath, compression) {
         await exec.exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
 }
+function s3Cache_sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function downloadSingleWithRetry(s3Key, archivePath, expectedSize) {
+    for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
+        try {
+            const { Body, ContentLength } = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: s3Key }));
+            if (!Body) {
+                throw new Error("Empty response body from S3");
+            }
+            await pipeline(Body, fs.createWriteStream(archivePath));
+            const downloadedSize = fs.statSync(archivePath).size;
+            if (downloadedSize <= 0) {
+                throw new Error("Downloaded cache archive is empty (0 bytes)");
+            }
+            const targetSize = expectedSize ?? ContentLength;
+            if (targetSize !== undefined && downloadedSize !== targetSize) {
+                throw new Error(`Downloaded size mismatch: expected ${targetSize} bytes, got ${downloadedSize} bytes`);
+            }
+            return downloadedSize;
+        }
+        catch (err) {
+            if (attempt >= MAX_DOWNLOAD_RETRIES) {
+                throw err;
+            }
+            await s3Cache_sleep(200 * attempt);
+        }
+    }
+    throw new Error("Download failed after retries");
+}
+async function downloadRangeWithRetry(s3Key, range, fileHandle) {
+    const expectedLength = range.end - range.start + 1;
+    const expectedContentRangePrefix = `bytes ${range.start}-${range.end}/`;
+    for (let attempt = 1; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
+        try {
+            const { Body, ContentRange } = await s3Client.send(new GetObjectCommand({
+                Bucket: bucketName,
+                Key: s3Key,
+                Range: `bytes=${range.start}-${range.end}`
+            }));
+            if (!Body) {
+                throw new Error(`Empty response body for range ${range.start}-${range.end}`);
+            }
+            if (ContentRange !== undefined &&
+                !ContentRange.startsWith(expectedContentRangePrefix)) {
+                throw new Error(`Range ${range.start}-${range.end} Content-Range mismatch: got "${ContentRange}"`);
+            }
+            let bytesWritten = 0;
+            for await (const chunk of Body) {
+                const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                if (bytesWritten + buf.length > expectedLength) {
+                    throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, received > ${expectedLength} bytes`);
+                }
+                let chunkOffset = 0;
+                while (chunkOffset < buf.length) {
+                    const { bytesWritten: written } = await fileHandle.write(buf, chunkOffset, buf.length - chunkOffset, range.start + bytesWritten);
+                    bytesWritten += written;
+                    chunkOffset += written;
+                }
+            }
+            if (bytesWritten !== expectedLength) {
+                throw new Error(`Range ${range.start}-${range.end} size mismatch: expected ${expectedLength} bytes, got ${bytesWritten} bytes`);
+            }
+            return;
+        }
+        catch (err) {
+            if (attempt >= MAX_DOWNLOAD_RETRIES) {
+                throw err;
+            }
+            await s3Cache_sleep(200 * attempt);
+        }
+    }
+}
+async function downloadConcurrentRanges(s3Key, archivePath, totalSize) {
+    const ranges = computeByteRanges(totalSize, tuningConfig.downloadPartSize);
+    const fileHandle = await fs.promises.open(archivePath, "w+");
+    try {
+        let nextIndex = 0;
+        const workerCount = Math.min(tuningConfig.downloadQueueSize, ranges.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (nextIndex < ranges.length) {
+                const range = ranges[nextIndex++];
+                await downloadRangeWithRetry(s3Key, range, fileHandle);
+            }
+        });
+        await Promise.all(workers);
+    }
+    finally {
+        await fileHandle.close();
+    }
+    const size = fs.statSync(archivePath).size;
+    if (size <= 0 || size !== totalSize) {
+        throw new Error(`Downloaded size mismatch: expected ${totalSize} bytes, got ${size} bytes`);
+    }
+    return size;
+}
 async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options, enableCrossOsArchive = false) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
@@ -132885,6 +132995,7 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
     let matchedKey;
     let s3Key;
+    let objectSize;
     for (const key of keys) {
         try {
             const { Contents = [] } = await s3Client.send(new ListObjectsV2Command({
@@ -132895,6 +133006,7 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
                 const latest = Contents.sort((a, b) => Number(b.LastModified) - Number(a.LastModified))[0];
                 s3Key = latest.Key;
                 matchedKey = s3Key.slice(prefix.length);
+                objectSize = latest.Size;
                 break;
             }
         }
@@ -132912,13 +133024,13 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
     try {
-        // Download directly via SDK without presigned URL
-        const { Body } = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: s3Key }));
-        if (!Body) {
-            throw new Error("Empty response body from S3");
+        if (objectSize === 0) {
+            throw new Error("Cached object is empty (0 bytes)");
         }
-        await pipeline(Body, fs.createWriteStream(archivePath));
-        const size = fs.statSync(archivePath).size;
+        const size = objectSize !== undefined &&
+            objectSize > tuningConfig.downloadPartSize
+            ? await downloadConcurrentRanges(s3Key, archivePath, objectSize)
+            : await downloadSingleWithRetry(s3Key, archivePath, objectSize);
         core.info(`Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`);
         await extractArchive(archivePath, compression);
         core.info("Cache restored successfully");
