@@ -20,7 +20,10 @@ const mockGlobCreate =
     >();
 const mockSend =
     jest.fn<
-        (command: { input: Record<string, unknown> }) => Promise<unknown>
+        (
+            command: { input: Record<string, unknown> },
+            options?: { abortSignal?: AbortSignal }
+        ) => Promise<unknown>
     >();
 const mockUploadDone = jest.fn<() => Promise<void>>();
 const mockUpload = jest.fn<
@@ -124,6 +127,7 @@ afterEach(() => {
     delete process.env["CACHE_S3_UPLOAD_PART_SIZE"];
     delete process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"];
     delete process.env["CACHE_S3_DOWNLOAD_PART_SIZE"];
+    delete process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"];
 });
 
 describe("saveCache", () => {
@@ -701,5 +705,261 @@ describe("S3 credential and path-style configuration", () => {
         expect(mockS3Client).toHaveBeenCalledWith(
             expect.objectContaining({ forcePathStyle: false })
         );
+    });
+});
+
+describe("S3 download timeout", () => {
+    test("stalled single download aborts on timeout and succeeds on retry", async () => {
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "50";
+        let getAttempts = 0;
+
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: 7
+                        }
+                    ]
+                };
+            }
+            getAttempts++;
+            if (getAttempts === 1) {
+                return {
+                    ContentLength: 7,
+                    Body: new Readable({
+                        read() {
+                            // Never push data to simulate a stalled stream.
+                        }
+                    })
+                };
+            }
+            return {
+                ContentLength: 7,
+                Body: Readable.from([Buffer.from("payload")])
+            };
+        });
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(getAttempts).toBe(2);
+    });
+
+    test("stalled single download fails after max retries", async () => {
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "30";
+        let getAttempts = 0;
+
+        mockSend.mockImplementation(async (command, options) => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: 7
+                        }
+                    ]
+                };
+            }
+            getAttempts++;
+            return new Promise((_resolve, reject) => {
+                options?.abortSignal?.addEventListener("abort", () => {
+                    reject(options.abortSignal?.reason ?? new Error("aborted"));
+                });
+            });
+        });
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBeUndefined();
+        expect(getAttempts).toBe(3);
+        expect(mockWarning).toHaveBeenCalledWith(
+            expect.stringContaining("Download timed out after 30ms")
+        );
+    });
+
+    test("stalled Range download aborts on timeout and succeeds on retry", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "2";
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "50";
+        const fullPayload = Buffer.from("abcdefgh");
+        const attemptsByRange: Record<string, number> = {};
+        let restoredBytes: Buffer | undefined;
+
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: fullPayload.length
+                        }
+                    ]
+                };
+            }
+            const rangeHeader = command.input.Range as string;
+            attemptsByRange[rangeHeader] =
+                (attemptsByRange[rangeHeader] ?? 0) + 1;
+            const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+            const start = Number(match![1]);
+            const end = Number(match![2]);
+            if (
+                rangeHeader === "bytes=0-3" &&
+                attemptsByRange[rangeHeader] === 1
+            ) {
+                return {
+                    ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                    Body: new Readable({
+                        read() {
+                            // Stall first attempt for range 0-3.
+                        }
+                    })
+                };
+            }
+            return {
+                ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                Body: Readable.from([fullPayload.subarray(start, end + 1)])
+            };
+        });
+
+        mockExec.mockImplementation(
+            async (_tool: string, args: string[] = []) => {
+                const xfIdx = args.findIndex(arg => /^-x[z]?f$/.test(arg));
+                if (xfIdx !== -1) {
+                    restoredBytes = await fs.promises.readFile(args[xfIdx + 1]);
+                }
+                return 0;
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(attemptsByRange["bytes=0-3"]).toBe(2);
+        expect(attemptsByRange["bytes=4-7"]).toBe(1);
+        expect(restoredBytes?.toString()).toBe("abcdefgh");
+    });
+
+    test("CACHE_S3_DOWNLOAD_TIMEOUT_MS=2147483648 warns and falls back to 30000 without TimeoutOverflowWarning", async () => {
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "2147483648";
+        const emitWarningSpy = jest.spyOn(process, "emitWarning");
+        try {
+            mockSend.mockImplementation(async command => {
+                if ("Prefix" in command.input) {
+                    return {
+                        Contents: [
+                            {
+                                Key: `${command.input.Prefix}`,
+                                LastModified: new Date(),
+                                Size: 7
+                            }
+                        ]
+                    };
+                }
+                return {
+                    ContentLength: 7,
+                    Body: Readable.from([Buffer.from("payload")])
+                };
+            });
+
+            const s3 = await loadS3Cache();
+            expect(mockWarning).toHaveBeenCalledWith(
+                expect.stringContaining(
+                    'Invalid CACHE_S3_DOWNLOAD_TIMEOUT_MS="2147483648"'
+                )
+            );
+            expect(mockWarning).toHaveBeenCalledWith(
+                expect.stringContaining("Falling back to 30000.")
+            );
+
+            const key = await s3.restoreCache(["/tmp/cached-dir"], "key");
+            expect(key).toBe("key");
+            const overflowWarnings = emitWarningSpy.mock.calls.filter(call =>
+                String(call[0]).includes("TimeoutOverflowWarning")
+            );
+            expect(overflowWarnings).toHaveLength(0);
+        } finally {
+            emitWarningSpy.mockRestore();
+        }
+    });
+
+    test("Range download ContentRange mismatch with short timeout safely disposes stream without unhandled error and retries cleanly", async () => {
+        process.env["CACHE_S3_DOWNLOAD_PART_SIZE"] = "4";
+        process.env["CACHE_S3_DOWNLOAD_QUEUE_SIZE"] = "1";
+        process.env["CACHE_S3_DOWNLOAD_TIMEOUT_MS"] = "40";
+        const fullPayload = Buffer.from("abcdefgh");
+        const attemptsByRange: Record<string, number> = {};
+        let restoredBytes: Buffer | undefined;
+
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: fullPayload.length
+                        }
+                    ]
+                };
+            }
+            const rangeHeader = command.input.Range as string;
+            attemptsByRange[rangeHeader] =
+                (attemptsByRange[rangeHeader] ?? 0) + 1;
+            const match = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+            const start = Number(match![1]);
+            const end = Number(match![2]);
+
+            if (
+                rangeHeader === "bytes=0-3" &&
+                attemptsByRange[rangeHeader] === 1
+            ) {
+                const unconsumedStream = new Readable({
+                    read() {
+                        // Never consumed due to ContentRange mismatch.
+                    },
+                    destroy(_err, cb) {
+                        // Simulate ChecksumStream emitting an error on destroy.
+                        cb(new Error("checksum stream destroyed early"));
+                    }
+                });
+                return {
+                    ContentRange: `bytes 999-1002/${fullPayload.length}`,
+                    Body: unconsumedStream
+                };
+            }
+            return {
+                ContentRange: `bytes ${start}-${end}/${fullPayload.length}`,
+                Body: Readable.from([fullPayload.subarray(start, end + 1)])
+            };
+        });
+
+        mockExec.mockImplementation(
+            async (_tool: string, args: string[] = []) => {
+                const xfIdx = args.findIndex(arg => /^-x[z]?f$/.test(arg));
+                if (xfIdx !== -1) {
+                    restoredBytes = await fs.promises.readFile(args[xfIdx + 1]);
+                }
+                return 0;
+            }
+        );
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "key");
+
+        expect(key).toBe("key");
+        expect(attemptsByRange["bytes=0-3"]).toBe(2);
+        expect(restoredBytes?.toString()).toBe("abcdefgh");
     });
 });
