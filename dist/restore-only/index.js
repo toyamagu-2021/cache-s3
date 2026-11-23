@@ -132738,6 +132738,9 @@ function s3Cache_checkPaths(paths) {
     }
 }
 function s3Cache_checkKey(key) {
+    if (!key) {
+        throw new Error("Key Validation Error: Key cannot be empty.");
+    }
     if (key.length > 512) {
         throw new Error(`Key Validation Error: ${key} cannot be larger than 512 characters.`);
     }

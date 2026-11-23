@@ -422,3 +422,28 @@ test("restore with S3 available passes lookupOnly option", async () => {
         `Cache found and can be restored from key: ${key}`
     );
 });
+
+test("restore with S3 available forwards enableCrossOsArchive=true", async () => {
+    const path = "node_modules";
+    const key = "node-test";
+    testUtils.setInputs({
+        path,
+        key,
+        enableCrossOsArchive: true
+    });
+
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
+    jest.mocked(s3Cache.restoreCache).mockResolvedValue(key);
+
+    await restoreImpl(new StateProvider());
+
+    expect(s3Cache.restoreCache).toHaveBeenCalledWith(
+        [path],
+        key,
+        [],
+        {
+            lookupOnly: false
+        },
+        true
+    );
+});

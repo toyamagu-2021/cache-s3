@@ -21,6 +21,9 @@ const mockGlobCreate =
 const mockSend =
     jest.fn<(command: { input: Record<string, string> }) => Promise<unknown>>();
 const mockUploadDone = jest.fn<() => Promise<void>>();
+const mockUpload = jest.fn<
+    (options: { params: { Key: string } }) => { done: () => Promise<void> }
+>(() => ({ done: mockUploadDone }));
 
 jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
 jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
@@ -33,7 +36,7 @@ jest.unstable_mockModule("@aws-sdk/client-s3", () => ({
 }));
 
 jest.unstable_mockModule("@aws-sdk/lib-storage", () => ({
-    Upload: jest.fn(() => ({ done: mockUploadDone }))
+    Upload: mockUpload
 }));
 
 type S3CacheModule = typeof import("../src/s3/s3Cache");
@@ -121,6 +124,62 @@ describe("saveCache", () => {
         expect(args[1]).toMatch(/cache\.tar\.gz$/);
         expect(args.slice(2)).toEqual(["-T", `${args[1]}.manifest`]);
     });
+
+    test("validates paths and key before resolving paths or calling S3", async () => {
+        mockGlobCreate.mockClear();
+        mockUpload.mockClear();
+        const s3 = await loadS3Cache();
+
+        await expect(s3.saveCache([], "key")).rejects.toThrow(
+            "Path Validation Error: At least one directory or file path is required"
+        );
+        await expect(s3.saveCache(["/tmp/cached-dir"], "")).rejects.toThrow(
+            "Key Validation Error: Key cannot be empty."
+        );
+        await expect(s3.saveCache(["/tmp/cached-dir"], "a,b")).rejects.toThrow(
+            "Key Validation Error: a,b cannot contain commas."
+        );
+        const longKey = "a".repeat(513);
+        await expect(
+            s3.saveCache(["/tmp/cached-dir"], longKey)
+        ).rejects.toThrow(
+            `Key Validation Error: ${longKey} cannot be larger than 512 characters.`
+        );
+        expect(mockGlobCreate).not.toHaveBeenCalled();
+        expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    test("isolates Windows cache version unless enableCrossOsArchive is true", async () => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(
+            process,
+            "platform"
+        );
+
+        try {
+            const s3 = await loadS3Cache();
+
+            Object.defineProperty(process, "platform", { value: "linux" });
+            mockUpload.mockClear();
+            await s3.saveCache(["/tmp/cached-dir"], "key", false);
+            const linuxKey = mockUpload.mock.calls[0][0].params.Key;
+
+            Object.defineProperty(process, "platform", { value: "win32" });
+            mockUpload.mockClear();
+            await s3.saveCache(["/tmp/cached-dir"], "key", false);
+            const winKey = mockUpload.mock.calls[0][0].params.Key;
+
+            mockUpload.mockClear();
+            await s3.saveCache(["/tmp/cached-dir"], "key", true);
+            const crossOsKey = mockUpload.mock.calls[0][0].params.Key;
+
+            expect(winKey).not.toBe(linuxKey);
+            expect(crossOsKey).toBe(linuxKey);
+        } finally {
+            if (originalPlatform) {
+                Object.defineProperty(process, "platform", originalPlatform);
+            }
+        }
+    });
 });
 
 describe("restoreCache", () => {
@@ -202,11 +261,18 @@ describe("restoreCache", () => {
     });
 
     test("validates paths and keys before calling S3", async () => {
+        mockSend.mockClear();
         const s3 = await loadS3Cache();
 
         await expect(s3.restoreCache([], "key")).rejects.toThrow(
             "Path Validation Error: At least one directory or file path is required"
         );
+        await expect(s3.restoreCache(["/tmp/cached-dir"], "")).rejects.toThrow(
+            "Key Validation Error: Key cannot be empty."
+        );
+        await expect(
+            s3.restoreCache(["/tmp/cached-dir"], "primary", [""])
+        ).rejects.toThrow("Key Validation Error: Key cannot be empty.");
         await expect(
             s3.restoreCache(["/tmp/cached-dir"], "a,b")
         ).rejects.toThrow("Key Validation Error: a,b cannot contain commas.");
@@ -222,6 +288,7 @@ describe("restoreCache", () => {
         ).rejects.toThrow(
             "Key Validation Error: Keys are limited to a maximum of 10."
         );
+        expect(mockSend).not.toHaveBeenCalled();
     });
 
     test("isolates Windows cache version unless enableCrossOsArchive is true", async () => {
@@ -229,11 +296,22 @@ describe("restoreCache", () => {
             process,
             "platform"
         );
-        Object.defineProperty(process, "platform", { value: "win32" });
 
         try {
             const s3 = await loadS3Cache();
 
+            Object.defineProperty(process, "platform", { value: "linux" });
+            mockSend.mockClear();
+            await s3.restoreCache(
+                ["/tmp/cached-dir"],
+                "key",
+                [],
+                { lookupOnly: true },
+                false
+            );
+            const linuxPrefix = mockSend.mock.calls[0][0].input.Prefix;
+
+            Object.defineProperty(process, "platform", { value: "win32" });
             mockSend.mockClear();
             await s3.restoreCache(
                 ["/tmp/cached-dir"],
@@ -254,7 +332,8 @@ describe("restoreCache", () => {
             );
             const crossOsPrefix = mockSend.mock.calls[0][0].input.Prefix;
 
-            expect(winPrefix).not.toBe(crossOsPrefix);
+            expect(winPrefix).not.toBe(linuxPrefix);
+            expect(crossOsPrefix).toBe(linuxPrefix);
         } finally {
             if (originalPlatform) {
                 Object.defineProperty(process, "platform", originalPlatform);
