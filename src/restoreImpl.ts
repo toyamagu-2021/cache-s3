@@ -15,7 +15,7 @@ export async function restoreImpl(
     earlyExit?: boolean | undefined
 ): Promise<string | undefined> {
     try {
-        if (!utils.isCacheFeatureAvailable()) {
+        if (!s3Cache.isS3Available() && !utils.isCacheFeatureAvailable()) {
             core.setOutput(Outputs.CacheHit, "false");
             return;
         }
@@ -44,7 +44,9 @@ export async function restoreImpl(
         const lookupOnly = utils.getInputAsBool(Inputs.LookupOnly);
 
         const cacheKey = s3Cache.isS3Available()
-            ? await s3Cache.restoreCache(cachePaths, primaryKey, restoreKeys)
+            ? await s3Cache.restoreCache(cachePaths, primaryKey, restoreKeys, {
+                  lookupOnly: lookupOnly
+              })
             : await cache.restoreCache(
                   cachePaths,
                   primaryKey,

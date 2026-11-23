@@ -127,7 +127,8 @@ async function extractArchive(
 export async function restoreCache(
     paths: string[],
     primaryKey: string,
-    restoreKeys: string[] = []
+    restoreKeys: string[] = [],
+    options?: { lookupOnly?: boolean }
 ): Promise<string | undefined> {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
@@ -165,6 +166,10 @@ export async function restoreCache(
 
     if (!s3Key || !matchedKey) {
         return undefined;
+    }
+
+    if (options?.lookupOnly) {
+        return matchedKey;
     }
 
     const tmpDir = await createTempDir();

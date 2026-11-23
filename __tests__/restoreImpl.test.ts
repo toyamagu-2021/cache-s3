@@ -39,8 +39,16 @@ jest.unstable_mockModule("@actions/cache", () => ({
     }
 }));
 
+// Mock ../src/s3/s3Cache
+jest.unstable_mockModule("../src/s3/s3Cache", () => ({
+    isS3Available: jest.fn(() => false),
+    restoreCache: jest.fn(),
+    saveCache: jest.fn()
+}));
+
 const core = await import("@actions/core");
 const cache = await import("@actions/cache");
+const s3Cache = await import("../src/s3/s3Cache");
 const { Events, Inputs, RefKey } = await import("../src/constants");
 const { restoreImpl } = await import("../src/restoreImpl");
 const { StateProvider } = await import("../src/stateProvider");
@@ -61,6 +69,7 @@ beforeEach(() => {
     );
     jest.mocked(core.getState).mockReturnValue("");
     jest.mocked(cache.isFeatureAvailable).mockReturnValue(true);
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(false);
     process.env[Events.Key] = Events.Push;
     process.env[RefKey] = "refs/heads/feature-branch";
 });
@@ -356,4 +365,48 @@ test("restore failure with earlyExit should call process exit", async () => {
     );
     expect(processExitMock).toHaveBeenCalledWith(1);
     processExitMock.mockRestore();
+});
+
+test("restore with S3 available and AC unavailable still restores from S3", async () => {
+    const path = "node_modules";
+    const key = "node-test";
+    testUtils.setInputs({
+        path,
+        key
+    });
+
+    jest.mocked(cache.isFeatureAvailable).mockReturnValue(false);
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
+    jest.mocked(s3Cache.restoreCache).mockResolvedValue(key);
+
+    await restoreImpl(new StateProvider());
+
+    expect(s3Cache.restoreCache).toHaveBeenCalledWith([path], key, [], {
+        lookupOnly: false
+    });
+    expect(cache.restoreCache).not.toHaveBeenCalled();
+    expect(core.setOutput).toHaveBeenCalledWith("cache-hit", "true");
+});
+
+test("restore with S3 available passes lookupOnly option", async () => {
+    const path = "node_modules";
+    const key = "node-test";
+    testUtils.setInputs({
+        path,
+        key,
+        lookupOnly: true
+    });
+
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
+    jest.mocked(s3Cache.restoreCache).mockResolvedValue(key);
+
+    await restoreImpl(new StateProvider());
+
+    expect(s3Cache.restoreCache).toHaveBeenCalledWith([path], key, [], {
+        lookupOnly: true
+    });
+    expect(core.setOutput).toHaveBeenCalledWith("cache-hit", "true");
+    expect(core.info).toHaveBeenCalledWith(
+        `Cache found and can be restored from key: ${key}`
+    );
 });
