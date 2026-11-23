@@ -45,10 +45,14 @@ const mockUpload = jest.fn<
 >(() => ({ on: mockUploadOn, done: mockUploadDone }));
 const mockWarning = jest.fn<(message: string | Error) => void>();
 const mockInfo = jest.fn<(message: string) => void>();
+const mockDebug = jest.fn<(message: string) => void>();
+const mockIsDebug = jest.fn<() => boolean>(() => false);
 
 jest.unstable_mockModule("@actions/core", () => ({
     warning: mockWarning,
-    info: mockInfo
+    info: mockInfo,
+    debug: mockDebug,
+    isDebug: mockIsDebug
 }));
 jest.unstable_mockModule("@actions/exec", () => ({ exec: mockExec }));
 jest.unstable_mockModule("@actions/io", () => ({ which: mockWhich }));
@@ -108,6 +112,9 @@ beforeEach(() => {
     mockS3Client.mockClear();
     mockWarning.mockClear();
     mockInfo.mockClear();
+    mockDebug.mockClear();
+    mockIsDebug.mockReset();
+    mockIsDebug.mockReturnValue(false);
     mockSend.mockClear();
     mockExec.mockClear();
 
@@ -1083,5 +1090,157 @@ describe("S3 transfer progress logging", () => {
         expect(receivedLogs[0]).toMatch(
             /^Received 50 of 100 \(50\.0%\), \d+\.\d MB\/s$/
         );
+    });
+});
+
+describe("S3 debug archive listing and diagnostics", () => {
+    test("lists gzip archive on saveCache and restoreCache when core.isDebug() is true", async () => {
+        mockIsDebug.mockReturnValue(true);
+        const s3 = await loadS3Cache();
+
+        await s3.saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockDebug).toHaveBeenCalledWith(
+            'Cache Paths: ["/tmp/cached-dir"]'
+        );
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringMatching(/^Archive Path: .*cache\.tar\.gz$/)
+        );
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[1]).toEqual([
+            "tar",
+            ["-tzf", expect.stringMatching(/cache\.tar\.gz$/)]
+        ]);
+
+        mockExec.mockClear();
+        mockDebug.mockClear();
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: 7
+                        }
+                    ]
+                };
+            }
+            return {
+                ContentLength: 7,
+                Body: Readable.from([Buffer.from("payload")])
+            };
+        });
+
+        const key = await s3.restoreCache(["/tmp/cached-dir"], "my-key", [
+            "fallback-"
+        ]);
+
+        expect(key).toBe("my-key");
+        expect(mockDebug).toHaveBeenCalledWith(
+            'Resolved Keys: ["my-key","fallback-"]'
+        );
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringMatching(/^Archive Path: .*cache\.tar\.gz$/)
+        );
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[0]).toEqual([
+            "tar",
+            ["-tzf", expect.stringMatching(/cache\.tar\.gz$/)]
+        ]);
+        expect(mockExec.mock.calls[1]).toEqual([
+            "tar",
+            ["-xzf", expect.stringMatching(/cache\.tar\.gz$/), "-C", "/"]
+        ]);
+    });
+
+    test("lists zstd archive when core.isDebug() is true and skips listing when false", async () => {
+        mockAvailableTools("zstd", "unzstd");
+        mockIsDebug.mockReturnValue(true);
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockExec).toHaveBeenCalledTimes(2);
+        expect(mockExec.mock.calls[1]).toEqual([
+            "tar",
+            [
+                "--use-compress-program",
+                "unzstd",
+                "-tf",
+                expect.stringMatching(/cache\.tar\.zst$/)
+            ]
+        ]);
+
+        mockExec.mockClear();
+        mockIsDebug.mockReturnValue(false);
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    test("listArchive failure does not abort saveCache upload or restoreCache extraction", async () => {
+        mockIsDebug.mockReturnValue(true);
+        mockExec.mockImplementation(
+            async (_tool: string, args: string[] = []) => {
+                const outputIndex = args.findIndex(arg =>
+                    /^-c[z]?f$/.test(arg)
+                );
+                if (outputIndex !== -1) {
+                    await fs.promises.writeFile(
+                        args[outputIndex + 1],
+                        "archive"
+                    );
+                    return 0;
+                }
+                if (args.includes("-tzf") || args.includes("-tf")) {
+                    throw new Error(
+                        "The process '/usr/bin/tar' failed with exit code 2"
+                    );
+                }
+                return 0;
+            }
+        );
+
+        const s3 = await loadS3Cache();
+        await s3.saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUploadDone).toHaveBeenCalledTimes(1);
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Failed to list archive:")
+        );
+
+        mockExec.mockClear();
+        mockDebug.mockClear();
+        mockSend.mockImplementation(async command => {
+            if ("Prefix" in command.input) {
+                return {
+                    Contents: [
+                        {
+                            Key: `${command.input.Prefix}`,
+                            LastModified: new Date(),
+                            Size: 7
+                        }
+                    ]
+                };
+            }
+            return {
+                ContentLength: 7,
+                Body: Readable.from([Buffer.from("payload")])
+            };
+        });
+
+        const key = await s3.restoreCache(["/tmp/cached-dir"], "my-key");
+
+        expect(key).toBe("my-key");
+        expect(mockDebug).toHaveBeenCalledWith(
+            expect.stringContaining("Failed to list archive:")
+        );
+        expect(mockExec).toHaveBeenCalledWith("tar", [
+            "-xzf",
+            expect.stringMatching(/cache\.tar\.gz$/),
+            "-C",
+            "/"
+        ]);
     });
 });
