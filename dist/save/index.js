@@ -132722,6 +132722,7 @@ const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.ur
 
 
 
+
 const DEFAULT_QUEUE_SIZE = 4;
 const DEFAULT_PART_SIZE = 32 * 1024 * 1024; // 32 MiB
 const MIN_UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MiB (S3 / @aws-sdk/lib-storage minimum)
@@ -132733,6 +132734,51 @@ function unsetAmbientAwsCredentials(env) {
         delete env["AWS_ACCESS_KEY_ID"];
         delete env["AWS_SECRET_ACCESS_KEY"];
         delete env["AWS_SESSION_TOKEN"];
+    }
+}
+class s3Cache_DownloadProgress {
+    totalBytes;
+    transferred = 0;
+    startTime = Date.now();
+    timer;
+    lastDisplayedBytes = -1;
+    constructor(totalBytes) {
+        this.totalBytes = totalBytes;
+    }
+    addBytes(bytes) {
+        if (bytes > 0) {
+            this.transferred += bytes;
+        }
+    }
+    start(intervalMs = 1000) {
+        this.startTime = Date.now();
+        this.stopTimer();
+        this.timer = setInterval(() => this.display(), intervalMs);
+        this.timer.unref?.();
+    }
+    display() {
+        const elapsedSeconds = Math.max((Date.now() - this.startTime) / 1000, 0.001);
+        const speedMBs = (this.transferred /
+            (1024 * 1024) /
+            elapsedSeconds).toFixed(1);
+        const pct = this.totalBytes > 0
+            ? Math.min(100, (this.transferred / this.totalBytes) * 100).toFixed(1)
+            : "0.0";
+        core.info(`Received ${this.transferred} of ${this.totalBytes} (${pct}%), ${speedMBs} MB/s`);
+        this.lastDisplayedBytes = this.transferred;
+    }
+    stop() {
+        this.stopTimer();
+        if (this.transferred > 0 &&
+            this.lastDisplayedBytes !== this.transferred) {
+            this.display();
+        }
+    }
+    stopTimer() {
+        if (this.timer !== undefined) {
+            clearInterval(this.timer);
+            this.timer = undefined;
+        }
     }
 }
 function parsePositiveInt(name, raw, fallback, minValue = 1, maxValue = Number.MAX_SAFE_INTEGER) {
@@ -132913,7 +132959,20 @@ async function downloadSingleWithRetry(s3Key, archivePath, expectedSize) {
                 if (!Body) {
                     throw new Error("Empty response body from S3");
                 }
-                await pipeline(Body, fs.createWriteStream(archivePath), { signal: controller.signal });
+                const progress = new s3Cache_DownloadProgress(expectedSize ?? ContentLength ?? 0);
+                progress.start();
+                try {
+                    const progressStream = new Transform({
+                        transform(chunk, _encoding, callback) {
+                            progress.addBytes(Buffer.byteLength(chunk));
+                            callback(null, chunk);
+                        }
+                    });
+                    await pipeline(Body, progressStream, fs.createWriteStream(archivePath), { signal: controller.signal });
+                }
+                finally {
+                    progress.stop();
+                }
                 const downloadedSize = fs.statSync(archivePath).size;
                 if (downloadedSize <= 0) {
                     throw new Error("Downloaded cache archive is empty (0 bytes)");
@@ -133036,6 +133095,8 @@ async function downloadRangeWithRetry(s3Key, range, fileHandle) {
 async function downloadConcurrentRanges(s3Key, archivePath, totalSize) {
     const ranges = computeByteRanges(totalSize, tuningConfig.downloadPartSize);
     const fileHandle = await fs.promises.open(archivePath, "w+");
+    const progress = new s3Cache_DownloadProgress(totalSize);
+    progress.start();
     try {
         let nextIndex = 0;
         const workerCount = Math.min(tuningConfig.downloadQueueSize, ranges.length);
@@ -133043,11 +133104,13 @@ async function downloadConcurrentRanges(s3Key, archivePath, totalSize) {
             while (nextIndex < ranges.length) {
                 const range = ranges[nextIndex++];
                 await downloadRangeWithRetry(s3Key, range, fileHandle);
+                progress.addBytes(range.end - range.start + 1);
             }
         });
         await Promise.all(workers);
     }
     finally {
+        progress.stop();
         await fileHandle.close();
     }
     const size = fs.statSync(archivePath).size;
@@ -133144,6 +133207,7 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
         const size = external_fs_namespaceObject.statSync(archivePath).size;
         info(`Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`);
         info(`Uploading cache to s3://${bucketName}/${s3Key}`);
+        const totalParts = Math.max(1, Math.ceil(size / tuningConfig.uploadPartSize));
         const upload = new lib_storage_dist_cjs/* Upload */._({
             client: s3Client,
             params: {
@@ -133153,6 +133217,11 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
             },
             partSize: tuningConfig.uploadPartSize,
             queueSize: tuningConfig.uploadQueueSize
+        });
+        upload.on("httpUploadProgress", progress => {
+            if (progress.part !== undefined) {
+                info(`Uploaded part ${progress.part}/${totalParts}`);
+            }
         });
         await upload.done();
         info("Cache saved successfully");
