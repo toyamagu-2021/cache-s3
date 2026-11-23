@@ -138,6 +138,65 @@ jobs:
       shell: bash
       run: __tests__/verify-cache-files.sh ${{ runner.os }} ~/test-cache
 
+  # End to end save and restore with S3 backend
+  test-s3:
+    runs-on: ubuntu-latest
+    env:
+      CACHE_S3_BUCKET: verify-bucket
+      CACHE_S3_FORCE_PATH_STYLE: 'true'
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test-access-key
+      AWS_SECRET_ACCESS_KEY: test-secret-key
+    steps:
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
+    - name: Start local S3 mock server
+      shell: bash
+      run: |
+        node .agents/skills/verify/scripts/control-cache-s3.mjs start-s3 --run-dir "$RUNNER_TEMP/cache-s3-e2e" --port 9000
+        node .agents/skills/verify/scripts/control-cache-s3.mjs doctor --run-dir "$RUNNER_TEMP/cache-s3-e2e"
+        echo "CACHE_S3_ENDPOINT=http://127.0.0.1:9000" >> "$GITHUB_ENV"
+    - name: Generate files in working directory
+      shell: bash
+      run: __tests__/create-cache-files.sh s3 test-cache
+    - name: Generate files outside working directory
+      shell: bash
+      run: __tests__/create-cache-files.sh s3 ~/test-cache
+    - name: Save cache to S3
+      uses: ./save
+      with:
+        key: test-s3-${{ github.run_id }}
+        path: |
+          test-cache
+          ~/test-cache
+    - name: Remove local cache directories
+      shell: bash
+      run: rm -rf test-cache ~/test-cache
+    - name: Restore cache from S3
+      id: restore-s3
+      uses: ./restore
+      with:
+        key: test-s3-${{ github.run_id }}
+        path: |
+          test-cache
+          ~/test-cache
+        fail-on-cache-miss: true
+    - name: Verify cache-hit output and restored files
+      shell: bash
+      run: |
+        if [ "${{ steps.restore-s3.outputs.cache-hit }}" != "true" ]; then
+          echo "Expected cache-hit to be true, got '${{ steps.restore-s3.outputs.cache-hit }}'"
+          exit 1
+        fi
+        __tests__/verify-cache-files.sh s3 test-cache
+        __tests__/verify-cache-files.sh s3 ~/test-cache
+    - name: Stop local S3 mock server
+      if: always()
+      shell: bash
+      run: node .agents/skills/verify/scripts/control-cache-s3.mjs cleanup --run-dir "$RUNNER_TEMP/cache-s3-e2e"
+
   # End to end with proxy
   test-proxy-save:
     runs-on: ubuntu-latest
