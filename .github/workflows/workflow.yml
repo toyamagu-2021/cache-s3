@@ -176,6 +176,9 @@ jobs:
       run: |
         apt-get update
         apt-get install -y iptables curl
+      env:
+        http_proxy: ""
+        https_proxy: ""
     - name: Verify proxy is working
       run: |
         echo "Testing proxy connectivity..."
@@ -273,6 +276,9 @@ jobs:
       run: |
         apt-get update
         apt-get install -y iptables curl
+      env:
+        http_proxy: ""
+        https_proxy: ""
     - name: Verify proxy is working
       run: |
         echo "Testing proxy connectivity..."
