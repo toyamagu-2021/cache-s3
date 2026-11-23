@@ -132735,9 +132735,7 @@ function parsePositiveInt(name, raw, fallback, minValue = 1) {
     if (!/^\d+$/.test(trimmed) ||
         !Number.isSafeInteger(parsed) ||
         parsed < minValue) {
-        const requirement = minValue > 1
-            ? `an integer >= ${minValue}`
-            : "a positive integer";
+        const requirement = minValue > 1 ? `an integer >= ${minValue}` : "a positive integer";
         warning(`Invalid ${name}="${raw}"; expected ${requirement}. Falling back to ${fallback}.`);
         return fallback;
     }
