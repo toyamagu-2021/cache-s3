@@ -305,7 +305,7 @@ test("save with S3 available and AC unavailable still saves to S3", async () => 
 
     (cache.isFeatureAvailable as jest.Mock).mockReturnValue(false);
     jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
-    jest.mocked(s3Cache.saveCache).mockResolvedValue(undefined);
+    jest.mocked(s3Cache.saveCache).mockResolvedValue(1);
 
     await saveImpl(new StateProvider());
 
@@ -335,7 +335,7 @@ test("save with S3 available forwards enableCrossOsArchive=true", async () => {
     });
 
     jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
-    jest.mocked(s3Cache.saveCache).mockResolvedValue(undefined);
+    jest.mocked(s3Cache.saveCache).mockResolvedValue(1);
 
     await saveImpl(new StateProvider());
 
@@ -344,4 +344,36 @@ test("save with S3 available forwards enableCrossOsArchive=true", async () => {
         primaryKey,
         true
     );
+});
+
+test("save with S3 reservation conflict returns -1 without logging cache saved or warning", async () => {
+    const primaryKey = "Linux-node-bb828da54c148048dd17899ba9fda624811cfb43";
+    const savedCacheKey = "Linux-node-";
+
+    (core.getState as jest.Mock)
+        .mockReturnValueOnce(primaryKey)
+        .mockReturnValueOnce(savedCacheKey);
+
+    const inputPath = "node_modules";
+    testUtils.setInput(Inputs.Path, inputPath);
+
+    jest.mocked(s3Cache.isS3Available).mockReturnValue(true);
+    jest.mocked(s3Cache.saveCache).mockResolvedValue(-1);
+
+    const cacheId = await saveImpl(new StateProvider());
+
+    expect(cacheId).toBe(-1);
+    expect(s3Cache.saveCache).toHaveBeenCalledWith(
+        [inputPath],
+        primaryKey,
+        false
+    );
+    expect(core.info).not.toHaveBeenCalledWith(
+        `Cache saved with key: ${primaryKey}`
+    );
+    expect(core.info).not.toHaveBeenCalledWith(
+        expect.stringContaining("[warning]")
+    );
+    expect(core.warning).not.toHaveBeenCalled();
+    expect(core.setFailed).not.toHaveBeenCalled();
 });
