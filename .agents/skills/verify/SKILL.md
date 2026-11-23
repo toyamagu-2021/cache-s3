@@ -57,6 +57,7 @@ node .agents/skills/verify/scripts/control-cache-s3.mjs run-action \
   [--input "restore-keys=<fallback-prefix>"] \
   [--input "fail-on-cache-miss=true"] \
   [--input "lookup-only=true"] \
+  [--env "<KEY>=<VALUE>"] \
   [--reset-state] \
   [--no-s3] \
   [--allow-failure] \
