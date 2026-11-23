@@ -132935,6 +132935,24 @@ async function extractArchive(archivePath, compression) {
         await exec_exec("tar", ["-xzf", archivePath, "-C", "/"]);
     }
 }
+async function listArchive(archivePath, compression) {
+    try {
+        if (compression === "zstd") {
+            await exec_exec("tar", [
+                "--use-compress-program",
+                await zstdDecompressProgram(),
+                "-tf",
+                archivePath
+            ]);
+        }
+        else {
+            await exec_exec("tar", ["-tzf", archivePath]);
+        }
+    }
+    catch (err) {
+        core_debug(`Failed to list archive: ${err.message}`);
+    }
+}
 function s3Cache_sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -133120,6 +133138,7 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     for (const key of keys) {
         s3Cache_checkKey(key);
     }
+    core_debug(`Resolved Keys: ${JSON.stringify(keys)}`);
     const compression = await getCompression();
     const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
     let matchedKey;
@@ -133152,6 +133171,7 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = external_path_.join(tmpDir, `cache.${ext}`);
+    core_debug(`Archive Path: ${archivePath}`);
     try {
         if (objectSize === 0) {
             throw new Error("Cached object is empty (0 bytes)");
@@ -133161,6 +133181,9 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
             ? await downloadConcurrentRanges(s3Key, archivePath, objectSize)
             : await downloadSingleWithRetry(s3Key, archivePath, objectSize);
         info(`Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`);
+        if (isDebug()) {
+            await listArchive(archivePath, compression);
+        }
         await extractArchive(archivePath, compression);
         info("Cache restored successfully");
         return matchedKey;
@@ -133188,11 +133211,16 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
     if (resolved.length === 0) {
         throw new Error(`Path Validation Error: Path(s) ${paths.join(", ")} do not exist.`);
     }
+    core.debug(`Cache Paths: ${JSON.stringify(resolved)}`);
     const tmpDir = await createTempDir();
     const ext = compression === "zstd" ? "tar.zst" : "tar.gz";
     const archivePath = path.join(tmpDir, `cache.${ext}`);
+    core.debug(`Archive Path: ${archivePath}`);
     try {
         await createArchive(archivePath, resolved, compression);
+        if (core.isDebug()) {
+            await listArchive(archivePath, compression);
+        }
         const size = fs.statSync(archivePath).size;
         core.info(`Cache Size: ~${Math.round(size / (1024 * 1024))} MB (${size} B)`);
         core.info(`Uploading cache to s3://${bucketName}/${s3Key}`);
