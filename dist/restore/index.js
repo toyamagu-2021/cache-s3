@@ -132865,13 +132865,71 @@ function cacheVersion(paths, compression, enableCrossOsArchive = false) {
         .update(components.join("|"))
         .digest("hex");
 }
-function s3Prefix(paths, compression, enableCrossOsArchive = false) {
-    const version = cacheVersion(paths, compression, enableCrossOsArchive);
-    if (tuningConfig.prefix) {
-        return `${tuningConfig.prefix}/${version}/`;
+function s3Prefix(scope, version) {
+    const root = tuningConfig.prefix || `cache/${process.env["GITHUB_REPOSITORY"]}`;
+    return `${root}/${scope}/${version}/`;
+}
+// A malformed or missing event payload is not an error here; it only means the
+// default branch is unknown, so CACHE_S3_DEFAULT_BRANCH is consulted instead.
+function readDefaultBranch(env) {
+    const eventPath = env["GITHUB_EVENT_PATH"];
+    if (eventPath) {
+        try {
+            const payload = JSON.parse(external_fs_namespaceObject.readFileSync(eventPath, "utf8"));
+            const branch = payload?.repository?.default_branch;
+            if (typeof branch === "string" && branch.trim()) {
+                return branch.trim();
+            }
+        }
+        catch (err) {
+            core_debug(`Failed to read default branch from ${eventPath}: ${err.message}`);
+        }
     }
-    const repo = process.env["GITHUB_REPOSITORY"];
-    return `cache/${repo}/${version}/`;
+    return env["CACHE_S3_DEFAULT_BRANCH"]?.trim() || undefined;
+}
+// Refs to search, in priority order, mirroring actions/cache scoping: the
+// current ref, then the PR base branch, then the default branch.
+function cacheScopes(ref, baseRef, defaultBranch) {
+    const scopes = [ref];
+    if (baseRef) {
+        scopes.push(`refs/heads/${baseRef}`);
+    }
+    if (defaultBranch) {
+        scopes.push(`refs/heads/${defaultBranch}`);
+    }
+    return [...new Set(scopes)];
+}
+function resolveScopes() {
+    const env = process.env;
+    const ref = env["GITHUB_REF"]?.trim();
+    if (!ref) {
+        throw new Error("GITHUB_REF is not set");
+    }
+    return cacheScopes(ref, env["GITHUB_BASE_REF"]?.trim(), readDefaultBranch(env));
+}
+// Within one scope, keys are tried in order and the newest object matching a
+// key prefix wins.
+async function findInScope(prefix, keys) {
+    for (const key of keys) {
+        try {
+            const { Contents = [] } = await s3Client.send(new dist_cjs.ListObjectsV2Command({
+                Bucket: bucketName,
+                Prefix: `${prefix}${key}`
+            }));
+            if (Contents.length > 0) {
+                const latest = Contents.sort((a, b) => Number(b.LastModified) - Number(a.LastModified))[0];
+                return {
+                    s3Key: latest.Key,
+                    matchedKey: latest.Key.slice(prefix.length),
+                    size: latest.Size
+                };
+            }
+        }
+        catch (err) {
+            warning(`Failed to list cache for key "${key}": ${err.message}`);
+        }
+    }
+    return undefined;
 }
 async function createTempDir() {
     return external_fs_namespaceObject.promises.mkdtemp(external_path_.join(external_os_.tmpdir(), "cache-s3-"));
@@ -133130,6 +133188,7 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
+    const scopes = resolveScopes();
     s3Cache_checkPaths(paths);
     const keys = [primaryKey, ...restoreKeys];
     if (keys.length > 10) {
@@ -133140,31 +133199,19 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
     }
     core_debug(`Resolved Keys: ${JSON.stringify(keys)}`);
     const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
-    let matchedKey;
-    let s3Key;
-    let objectSize;
-    for (const key of keys) {
-        try {
-            const { Contents = [] } = await s3Client.send(new dist_cjs.ListObjectsV2Command({
-                Bucket: bucketName,
-                Prefix: `${prefix}${key}`
-            }));
-            if (Contents.length > 0) {
-                const latest = Contents.sort((a, b) => Number(b.LastModified) - Number(a.LastModified))[0];
-                s3Key = latest.Key;
-                matchedKey = s3Key.slice(prefix.length);
-                objectSize = latest.Size;
-                break;
-            }
-        }
-        catch (err) {
-            warning(`Failed to list cache for key "${key}": ${err.message}`);
+    const version = cacheVersion(paths, compression, enableCrossOsArchive);
+    let entry;
+    for (const scope of scopes) {
+        entry = await findInScope(s3Prefix(scope, version), keys);
+        if (entry) {
+            core_debug(`Cache found in scope ${scope}`);
+            break;
         }
     }
-    if (!s3Key || !matchedKey) {
+    if (!entry) {
         return undefined;
     }
+    const { s3Key, matchedKey, size: objectSize } = entry;
     if (options?.lookupOnly) {
         return matchedKey;
     }
@@ -133202,11 +133249,12 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
+    const [scope] = resolveScopes();
     s3Cache_checkPaths(paths);
     s3Cache_checkKey(key);
     const compression = await getCompression();
-    const prefix = s3Prefix(paths, compression, enableCrossOsArchive);
-    const s3Key = `${prefix}${key}`;
+    const version = cacheVersion(paths, compression, enableCrossOsArchive);
+    const s3Key = `${s3Prefix(scope, version)}${key}`;
     const resolved = await s3Cache_resolvePaths(paths);
     if (resolved.length === 0) {
         throw new Error(`Path Validation Error: Path(s) ${paths.join(", ")} do not exist.`);
