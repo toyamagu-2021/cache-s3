@@ -4,7 +4,7 @@ Users configure S3 backend behavior via environment variables for custom key pre
 
 ## Sub-features
 
-- `s3-custom-prefix` stores and restores objects under `<CACHE_S3_PREFIX>/<version>/<key>` (with leading/trailing slashes trimmed) instead of `cache/<owner>/<repo>/<version>/<key>`.
+- `s3-custom-prefix` stores and restores objects under `<CACHE_S3_PREFIX>/<ref>/<version>/<key>` (with leading/trailing slashes trimmed) instead of `cache/<owner>/<repo>/<ref>/<version>/<key>`.
 - `s3-concurrent-range-download` splits downloads larger than `CACHE_S3_DOWNLOAD_PART_SIZE` into concurrent HTTP `Range` (`206 Partial Content`) requests and logs `Received X of Y (Z%), N MB/s`.
 - `s3-upload-progress` logs `Uploaded part X/Y` during S3 uploads.
 - `s3-debug-archive-listing` logs `::debug::Resolved Keys:`, `::debug::Cache Paths:`, `::debug::Archive Path:`, and lists archive entries (`tar -t`) when `RUNNER_DEBUG=1`.
