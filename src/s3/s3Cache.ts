@@ -3,6 +3,7 @@ import * as exec from "@actions/exec";
 import * as glob from "@actions/glob";
 import * as io from "@actions/io";
 import {
+    AbortMultipartUploadCommand,
     GetObjectCommand,
     ListObjectsV2Command,
     S3Client
@@ -709,11 +710,29 @@ export async function restoreCache(
     }
 }
 
+function isConditionalWriteConflict(err: unknown): boolean {
+    if (!err || typeof err !== "object") {
+        return false;
+    }
+    const s3Err = err as {
+        name?: string;
+        Code?: string;
+        $metadata?: { httpStatusCode?: number };
+    };
+    return (
+        s3Err.name === "PreconditionFailed" ||
+        s3Err.Code === "PreconditionFailed" ||
+        s3Err.$metadata?.httpStatusCode === 412 ||
+        s3Err.name === "ConditionalRequestConflict" ||
+        s3Err.Code === "ConditionalRequestConflict"
+    );
+}
+
 export async function saveCache(
     paths: string[],
     key: string,
     enableCrossOsArchive = false
-): Promise<void> {
+): Promise<number> {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
     }
@@ -760,7 +779,8 @@ export async function saveCache(
             params: {
                 Bucket: bucketName,
                 Key: s3Key,
-                Body: fs.createReadStream(archivePath)
+                Body: fs.createReadStream(archivePath),
+                IfNoneMatch: "*"
             },
             partSize: tuningConfig.uploadPartSize,
             queueSize: tuningConfig.uploadQueueSize
@@ -770,8 +790,30 @@ export async function saveCache(
                 core.info(`Uploaded part ${progress.part}/${totalParts}`);
             }
         });
-        await upload.done();
+        try {
+            await upload.done();
+        } catch (err) {
+            if (isConditionalWriteConflict(err)) {
+                if (upload.uploadId) {
+                    await s3Client
+                        .send(
+                            new AbortMultipartUploadCommand({
+                                Bucket: bucketName,
+                                Key: s3Key,
+                                UploadId: upload.uploadId
+                            })
+                        )
+                        .catch(() => undefined);
+                }
+                core.info(
+                    `Failed to save: Unable to reserve cache with key ${key}, another job may be creating this cache.`
+                );
+                return -1;
+            }
+            throw err;
+        }
         core.info("Cache saved successfully");
+        return 1;
     } finally {
         await fs.promises
             .rm(tmpDir, { recursive: true, force: true })

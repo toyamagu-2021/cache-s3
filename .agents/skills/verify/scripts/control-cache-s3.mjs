@@ -152,6 +152,7 @@ async function runS3Server(port, storageDir, pidFile) {
                 key,
                 query,
                 range: req.headers.range || null,
+                ifNoneMatch: req.headers["if-none-match"] || null,
                 size: body.length
             });
 
@@ -225,6 +226,24 @@ async function runS3Server(port, storageDir, pidFile) {
             // CompleteMultipartUpload: POST /<bucket>/<key>?uploadId=ID
             if (req.method === "POST" && query.uploadId) {
                 const uploadDir = path.join(storageDir, "uploads", query.uploadId);
+                const { dataPath, metaPath } = encodeObjectPath(
+                    storageDir,
+                    bucket,
+                    key
+                );
+                if (
+                    req.headers["if-none-match"] === "*" &&
+                    fs.existsSync(dataPath) &&
+                    fs.existsSync(metaPath)
+                ) {
+                    fs.rmSync(uploadDir, { recursive: true, force: true });
+                    const xml =
+                        `<?xml version="1.0" encoding="UTF-8"?>` +
+                        `<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`;
+                    res.writeHead(412, { "content-type": "application/xml" });
+                    res.end(xml);
+                    return;
+                }
                 const partFiles = fs.existsSync(uploadDir)
                     ? fs
                           .readdirSync(uploadDir)
@@ -236,11 +255,6 @@ async function runS3Server(port, storageDir, pidFile) {
                 );
                 const combined = Buffer.concat(buffers);
                 const etag = crypto.createHash("md5").update(combined).digest("hex");
-                const { dataPath, metaPath } = encodeObjectPath(
-                    storageDir,
-                    bucket,
-                    key
-                );
                 fs.mkdirSync(path.dirname(dataPath), { recursive: true });
                 fs.writeFileSync(dataPath, combined);
                 fs.writeFileSync(
@@ -282,12 +296,24 @@ async function runS3Server(port, storageDir, pidFile) {
 
             // PutObject: PUT /<bucket>/<key>
             if (req.method === "PUT" && key) {
-                const etag = crypto.createHash("md5").update(body).digest("hex");
                 const { dataPath, metaPath } = encodeObjectPath(
                     storageDir,
                     bucket,
                     key
                 );
+                if (
+                    req.headers["if-none-match"] === "*" &&
+                    fs.existsSync(dataPath) &&
+                    fs.existsSync(metaPath)
+                ) {
+                    const xml =
+                        `<?xml version="1.0" encoding="UTF-8"?>` +
+                        `<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`;
+                    res.writeHead(412, { "content-type": "application/xml" });
+                    res.end(xml);
+                    return;
+                }
+                const etag = crypto.createHash("md5").update(body).digest("hex");
                 fs.mkdirSync(path.dirname(dataPath), { recursive: true });
                 fs.writeFileSync(dataPath, body);
                 fs.writeFileSync(

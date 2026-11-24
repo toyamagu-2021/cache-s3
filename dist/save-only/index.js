@@ -133209,6 +133209,17 @@ async function s3Cache_restoreCache(paths, primaryKey, restoreKeys = [], options
             .catch(() => undefined);
     }
 }
+function isConditionalWriteConflict(err) {
+    if (!err || typeof err !== "object") {
+        return false;
+    }
+    const s3Err = err;
+    return (s3Err.name === "PreconditionFailed" ||
+        s3Err.Code === "PreconditionFailed" ||
+        s3Err.$metadata?.httpStatusCode === 412 ||
+        s3Err.name === "ConditionalRequestConflict" ||
+        s3Err.Code === "ConditionalRequestConflict");
+}
 async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
     if (!bucketName) {
         throw new Error("CACHE_S3_BUCKET is not set");
@@ -133241,7 +133252,8 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
             params: {
                 Bucket: bucketName,
                 Key: s3Key,
-                Body: external_fs_namespaceObject.createReadStream(archivePath)
+                Body: external_fs_namespaceObject.createReadStream(archivePath),
+                IfNoneMatch: "*"
             },
             partSize: tuningConfig.uploadPartSize,
             queueSize: tuningConfig.uploadQueueSize
@@ -133251,8 +133263,27 @@ async function s3Cache_saveCache(paths, key, enableCrossOsArchive = false) {
                 info(`Uploaded part ${progress.part}/${totalParts}`);
             }
         });
-        await upload.done();
+        try {
+            await upload.done();
+        }
+        catch (err) {
+            if (isConditionalWriteConflict(err)) {
+                if (upload.uploadId) {
+                    await s3Client
+                        .send(new dist_cjs.AbortMultipartUploadCommand({
+                        Bucket: bucketName,
+                        Key: s3Key,
+                        UploadId: upload.uploadId
+                    }))
+                        .catch(() => undefined);
+                }
+                info(`Failed to save: Unable to reserve cache with key ${key}, another job may be creating this cache.`);
+                return -1;
+            }
+            throw err;
+        }
         info("Cache saved successfully");
+        return 1;
     }
     finally {
         await external_fs_namespaceObject.promises
@@ -133396,8 +133427,7 @@ async function saveImpl(stateProvider) {
         });
         const enableCrossOsArchive = getInputAsBool(Inputs.EnableCrossOsArchive);
         if (isS3Available()) {
-            await s3Cache_saveCache(cachePaths, primaryKey, enableCrossOsArchive);
-            cacheId = 1;
+            cacheId = await s3Cache_saveCache(cachePaths, primaryKey, enableCrossOsArchive);
         }
         else {
             cacheId = await cache_saveCache(cachePaths, primaryKey, {
