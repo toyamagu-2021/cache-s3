@@ -7,6 +7,8 @@ import {
     test
 } from "@jest/globals";
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { Readable } from "stream";
 
 const mockExec = jest.fn<(tool: string, args?: string[]) => Promise<number>>();
@@ -106,6 +108,11 @@ beforeEach(() => {
     process.env["CACHE_S3_BUCKET"] = "test-bucket";
     process.env["AWS_REGION"] = "us-east-1";
     process.env["GITHUB_REPOSITORY"] = "owner/repo";
+    process.env["GITHUB_REF"] = "refs/heads/feature";
+    // The runner sets these in CI; clear them so scope resolution is hermetic.
+    delete process.env["GITHUB_BASE_REF"];
+    delete process.env["GITHUB_EVENT_PATH"];
+    delete process.env["CACHE_S3_DEFAULT_BRANCH"];
 
     // No zstd on PATH keeps saveCache on the single-command gzip path.
     mockWhich.mockRejectedValue(new Error("not found"));
@@ -148,6 +155,10 @@ afterEach(() => {
     delete process.env["AWS_SECRET_ACCESS_KEY"];
     delete process.env["AWS_SESSION_TOKEN"];
     delete process.env["GITHUB_REPOSITORY"];
+    delete process.env["GITHUB_REF"];
+    delete process.env["GITHUB_BASE_REF"];
+    delete process.env["GITHUB_EVENT_PATH"];
+    delete process.env["CACHE_S3_DEFAULT_BRANCH"];
     delete process.env["CACHE_S3_PREFIX"];
     delete process.env["CACHE_S3_FORCE_PATH_STYLE"];
     delete process.env["AWS_S3_FORCE_PATH_STYLE"];
@@ -828,14 +839,16 @@ describe("restoreCache", () => {
 });
 
 describe("S3 prefix and tuning configuration", () => {
-    test("CACHE_S3_PREFIX overrides cache/<repo>/ while preserving <version>/ and trimming slashes", async () => {
+    test("CACHE_S3_PREFIX overrides cache/<repo>/ while preserving <ref>/<version>/ and trimming slashes", async () => {
         process.env["CACHE_S3_PREFIX"] = "/custom/prefix///";
 
         await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
 
         expect(mockUpload).toHaveBeenCalledTimes(1);
         const uploadedKey = mockUpload.mock.calls[0][0].params.Key;
-        expect(uploadedKey).toMatch(/^custom\/prefix\/[0-9a-f]{64}\/my-key$/);
+        expect(uploadedKey).toMatch(
+            /^custom\/prefix\/refs\/heads\/feature\/[0-9a-f]{64}\/my-key$/
+        );
     });
 
     test("whitespace or slash-only CACHE_S3_PREFIX falls back to cache/<repo>/", async () => {
@@ -846,7 +859,7 @@ describe("S3 prefix and tuning configuration", () => {
         expect(mockUpload).toHaveBeenCalledTimes(1);
         const uploadedKey = mockUpload.mock.calls[0][0].params.Key;
         expect(uploadedKey).toMatch(
-            /^cache\/owner\/repo\/[0-9a-f]{64}\/my-key$/
+            /^cache\/owner\/repo\/refs\/heads\/feature\/[0-9a-f]{64}\/my-key$/
         );
     });
 
@@ -875,6 +888,266 @@ describe("S3 prefix and tuning configuration", () => {
         expect(mockUpload.mock.calls[0][0].queueSize).toBe(4);
         expect(mockUpload.mock.calls[0][0].partSize).toBe(32 * 1024 * 1024);
     });
+});
+
+describe("cache scoping by GITHUB_REF", () => {
+    type StoredObject = { ref: string; key: string; LastModified: Date };
+
+    // Fake bucket: objects are addressed by ref and key, and the version
+    // segment is echoed back from the request so tests need not compute it.
+    function useBucket(objects: StoredObject[]): void {
+        mockSend.mockImplementation(async command => {
+            const { Prefix, Key } = command.input as {
+                Prefix?: string;
+                Key?: string;
+            };
+            if (Prefix === undefined) {
+                expect(Key).toBeDefined();
+                return { Body: Readable.from(["archive"]) };
+            }
+            const match =
+                /^cache\/owner\/repo\/(.+)\/([0-9a-f]{64})\/(.*)$/.exec(Prefix);
+            if (!match) {
+                return { Contents: [] };
+            }
+            const [, ref, version, keyPrefix] = match;
+            return {
+                Contents: objects
+                    .filter(o => o.ref === ref && o.key.startsWith(keyPrefix))
+                    .map(o => ({
+                        Key: `cache/owner/repo/${o.ref}/${version}/${o.key}`,
+                        LastModified: o.LastModified
+                    }))
+            };
+        });
+    }
+
+    function listedRefs(): string[] {
+        return mockSend.mock.calls
+            .map(([command]) => command.input["Prefix"])
+            .filter((p): p is string => typeof p === "string")
+            .map(p => /^cache\/owner\/repo\/(.+)\/[0-9a-f]{64}\//.exec(p)![1]);
+    }
+
+    function fetchedKeys(): string[] {
+        return mockSend.mock.calls
+            .map(([command]) => command.input)
+            .filter(input => !("Prefix" in input))
+            .map(input => input["Key"] as string);
+    }
+
+    function writeEventPayload(contents: string): string {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cache-s3-event-"));
+        const file = path.join(dir, "event.json");
+        fs.writeFileSync(file, contents);
+        process.env["GITHUB_EVENT_PATH"] = file;
+        return file;
+    }
+
+    const older = new Date("2024-01-01T00:00:00Z");
+    const newer = new Date("2024-06-01T00:00:00Z");
+
+    test("saveCache writes only under the current ref", async () => {
+        process.env["GITHUB_REF"] = "refs/pull/7/merge";
+        process.env["GITHUB_BASE_REF"] = "main";
+        process.env["CACHE_S3_DEFAULT_BRANCH"] = "main";
+
+        await (await loadS3Cache()).saveCache(["/tmp/cached-dir"], "my-key");
+
+        expect(mockUpload).toHaveBeenCalledTimes(1);
+        expect(mockUpload.mock.calls[0][0].params.Key).toMatch(
+            /^cache\/owner\/repo\/refs\/pull\/7\/merge\/[0-9a-f]{64}\/my-key$/
+        );
+    });
+
+    test("restore prefers the current ref over newer base and default ref entries", async () => {
+        process.env["GITHUB_REF"] = "refs/pull/7/merge";
+        process.env["GITHUB_BASE_REF"] = "release";
+        process.env["CACHE_S3_DEFAULT_BRANCH"] = "main";
+        useBucket([
+            { ref: "refs/pull/7/merge", key: "deps-pr", LastModified: older },
+            {
+                ref: "refs/heads/release",
+                key: "deps-base",
+                LastModified: newer
+            },
+            { ref: "refs/heads/main", key: "deps-main", LastModified: newer }
+        ]);
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "deps-primary", ["deps-"]);
+
+        expect(key).toBe("deps-pr");
+        expect(fetchedKeys()).toEqual([
+            expect.stringMatching(
+                /^cache\/owner\/repo\/refs\/pull\/7\/merge\/[0-9a-f]{64}\/deps-pr$/
+            )
+        ]);
+    });
+
+    test("restore tries every key in a ref before falling back to the base ref, then the default ref", async () => {
+        process.env["GITHUB_REF"] = "refs/pull/7/merge";
+        process.env["GITHUB_BASE_REF"] = "release";
+        process.env["CACHE_S3_DEFAULT_BRANCH"] = "main";
+        useBucket([
+            { ref: "refs/heads/main", key: "deps-main", LastModified: older }
+        ]);
+        const s3 = await loadS3Cache();
+
+        const fromDefault = await s3.restoreCache(
+            ["/tmp/cached-dir"],
+            "deps-primary",
+            ["deps-"],
+            { lookupOnly: true }
+        );
+
+        expect(fromDefault).toBe("deps-main");
+        expect(listedRefs()).toEqual([
+            "refs/pull/7/merge",
+            "refs/pull/7/merge",
+            "refs/heads/release",
+            "refs/heads/release",
+            "refs/heads/main",
+            "refs/heads/main"
+        ]);
+
+        useBucket([
+            {
+                ref: "refs/heads/release",
+                key: "deps-base",
+                LastModified: older
+            },
+            { ref: "refs/heads/main", key: "deps-main", LastModified: newer }
+        ]);
+        const fromBase = await s3.restoreCache(
+            ["/tmp/cached-dir"],
+            "deps-primary",
+            ["deps-"],
+            { lookupOnly: true }
+        );
+
+        expect(fromBase).toBe("deps-base");
+    });
+
+    test("does not restore caches from a sibling branch", async () => {
+        process.env["GITHUB_REF"] = "refs/heads/feature-b";
+        process.env["CACHE_S3_DEFAULT_BRANCH"] = "main";
+        useBucket([
+            { ref: "refs/heads/feature-a", key: "deps", LastModified: newer }
+        ]);
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "deps");
+
+        expect(key).toBeUndefined();
+        expect(listedRefs()).toEqual([
+            "refs/heads/feature-b",
+            "refs/heads/main"
+        ]);
+        expect(mockExec).not.toHaveBeenCalled();
+    });
+
+    test("reads the default branch from the GITHUB_EVENT_PATH payload", async () => {
+        writeEventPayload(
+            JSON.stringify({ repository: { default_branch: "trunk" } })
+        );
+        process.env["CACHE_S3_DEFAULT_BRANCH"] = "ignored";
+        useBucket([
+            { ref: "refs/heads/trunk", key: "deps", LastModified: older }
+        ]);
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "deps", [], { lookupOnly: true });
+
+        expect(key).toBe("deps");
+        expect(listedRefs()).toEqual([
+            "refs/heads/feature",
+            "refs/heads/trunk"
+        ]);
+    });
+
+    test.each([
+        ["lacks repository.default_branch", JSON.stringify({ repository: {} })],
+        ["is not valid JSON", "{not json"]
+    ])(
+        "falls back to CACHE_S3_DEFAULT_BRANCH when the event payload %s",
+        async (_label, contents) => {
+            writeEventPayload(contents);
+            process.env["CACHE_S3_DEFAULT_BRANCH"] = "develop";
+            useBucket([
+                { ref: "refs/heads/develop", key: "deps", LastModified: older }
+            ]);
+
+            const key = await (
+                await loadS3Cache()
+            ).restoreCache(["/tmp/cached-dir"], "deps", [], {
+                lookupOnly: true
+            });
+
+            expect(key).toBe("deps");
+            expect(listedRefs()).toEqual([
+                "refs/heads/feature",
+                "refs/heads/develop"
+            ]);
+        }
+    );
+
+    test("searches only the current ref when no base or default branch is known", async () => {
+        writeEventPayload("{}");
+        useBucket([]);
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "deps", ["d"], {
+            lookupOnly: true
+        });
+
+        expect(key).toBeUndefined();
+        expect(listedRefs()).toEqual([
+            "refs/heads/feature",
+            "refs/heads/feature"
+        ]);
+    });
+
+    test("lists a single scope when running on the default branch itself", async () => {
+        process.env["GITHUB_REF"] = "refs/heads/main";
+        process.env["GITHUB_BASE_REF"] = "";
+        writeEventPayload(
+            JSON.stringify({ repository: { default_branch: "main" } })
+        );
+        useBucket([]);
+
+        const key = await (
+            await loadS3Cache()
+        ).restoreCache(["/tmp/cached-dir"], "deps", [], { lookupOnly: true });
+
+        expect(key).toBeUndefined();
+        expect(listedRefs()).toEqual(["refs/heads/main"]);
+    });
+
+    test.each([undefined, "", "  "])(
+        "saveCache and restoreCache reject when GITHUB_REF is %p",
+        async ref => {
+            if (ref === undefined) {
+                delete process.env["GITHUB_REF"];
+            } else {
+                process.env["GITHUB_REF"] = ref;
+            }
+            const s3 = await loadS3Cache();
+
+            await expect(
+                s3.saveCache(["/tmp/cached-dir"], "key")
+            ).rejects.toThrow("GITHUB_REF is not set");
+            await expect(
+                s3.restoreCache(["/tmp/cached-dir"], "key")
+            ).rejects.toThrow("GITHUB_REF is not set");
+            expect(mockUpload).not.toHaveBeenCalled();
+            expect(mockSend).not.toHaveBeenCalled();
+        }
+    );
 });
 
 describe("S3 credential and path-style configuration", () => {

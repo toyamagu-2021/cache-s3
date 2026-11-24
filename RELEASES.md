@@ -35,6 +35,18 @@ the code this fork builds on.
 
 ## Changelog
 
+### Unreleased (this fork)
+
+- **Breaking:** S3 cache keys are scoped by `GITHUB_REF`. Objects are stored at
+  `<root>/<ref>/<version>/<key>` instead of `<root>/<version>/<key>`, where `<root>` is
+  `CACHE_S3_PREFIX` or `cache/<owner>/<repo>`. Existing caches miss once after upgrading, and
+  lifecycle rules or tooling that assume the old layout need updating.
+- Restores search the current ref, then the pull request base branch, then the default branch,
+  matching upstream `actions/cache`. Caches from sibling branches are no longer restored.
+- `CACHE_S3_DEFAULT_BRANCH` sets the default branch when the event payload lacks
+  `repository.default_branch`.
+- The S3 backend fails when `GITHUB_REF` is not set.
+
 ### 6.0.0 (this fork)
 
 - Merged upstream `actions/cache` v6.1.0: `@actions/cache` v6.2.0, `@actions/core` v3.0.1,

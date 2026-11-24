@@ -23,7 +23,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 
 - Capture both the action step execution (`--evidence-file "$EVIDENCE_DIR/<step>.json"`) and the resulting state.
 - Step proof includes `entry`, `exitCode`, `inputs`, `outputs`, `states`, `stdout`, and `stderr`.
-- Mutation proof for cache save includes a second read-only view via `list-objects` confirming the S3 object key (`cache/<owner>/<repo>/<version>/<key>`) and byte size, plus a restore verification after deleting the cached directory on disk.
+- Mutation proof for cache save includes a second read-only view via `list-objects` confirming the S3 object key (`cache/<owner>/<repo>/<ref>/<version>/<key>`) and byte size, plus a restore verification after deleting the cached directory on disk.
 - Record the feature ID and entry point used with every artifact.
 - Report an unreachable path with the attempted command and the unmet precondition.
 - Do not report a skipped entry point as verified through a different path.
@@ -45,4 +45,5 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Restore keys prefix fallback (`restore-keys`)](./restore-keys-fallback.md) covers restoring a stale prefix-matched S3 cache when the primary key misses, verifying `cache-hit: false`, and saving a new cache under the primary key.
 - [Standalone `restore-only` and `save-only` sub-actions](./standalone-subactions.md) covers independent save (`save/action.yml`) and restore (`restore/action.yml`) with `cache-primary-key`, `cache-matched-key`, and `cache-hit` outputs and `fail-on-cache-miss` handling.
 - [Compression and archive fidelity (`zstd` vs `gzip` and symlinks)](./compression-and-archives.md) covers `zstd` vs `gzip` cache version partitioning and symlink preservation without duplicate directory expansion.
+- [Ref-scoped caches and restore fallback (`GITHUB_REF`)](./ref-scoping.md) covers saving under the current ref, restoring a default-branch cache from a pull request ref, and isolating sibling branches.
 - [S3 tuning, prefix override, progress logging, and debug diagnostics](./s3-tuning-and-diagnostics.md) covers `CACHE_S3_PREFIX`, concurrent `Range` downloads (`CACHE_S3_DOWNLOAD_PART_SIZE` / `CACHE_S3_DOWNLOAD_QUEUE_SIZE`), upload/download progress logs, and `RUNNER_DEBUG=1` archive listing.

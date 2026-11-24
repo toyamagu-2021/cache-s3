@@ -13,7 +13,8 @@ If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub ca
 | `CACHE_S3_ENDPOINT`              | Custom endpoint URL (e.g. for MinIO)                                                                                                             |
 | `CACHE_S3_FORCE_PATH_STYLE`      | Set to `true` for path-style S3 URLs (falls back to `AWS_S3_FORCE_PATH_STYLE` when unset)                                                        |
 | `CACHE_S3_UNSET_AWS_CREDENTIALS` | Set to `true` to unset `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` before creating the S3 client (preserves `AWS_REGION`) |
-| `CACHE_S3_PREFIX`                | Custom S3 key prefix override (default: `cache/<owner>/<repo>`)                                                                                  |
+| `CACHE_S3_PREFIX`                | Custom root for S3 keys, replacing `cache/<owner>/<repo>`. Keys are still scoped by ref: `<CACHE_S3_PREFIX>/<ref>/<version>/<key>`                 |
+| `CACHE_S3_DEFAULT_BRANCH`        | Default branch name used as the last restore fallback when the `GITHUB_EVENT_PATH` payload has no `repository.default_branch`                     |
 | `CACHE_S3_UPLOAD_QUEUE_SIZE`     | Number of concurrent upload parts (default: `4`)                                                                                                 |
 | `CACHE_S3_UPLOAD_PART_SIZE`      | Upload part size in bytes (default: `33554432`, 32 MiB; minimum: `5242880`, 5 MiB)                                                               |
 | `CACHE_S3_DOWNLOAD_QUEUE_SIZE`   | Number of concurrent `Range` download parts (default: `4`)                                                                                       |
@@ -21,6 +22,55 @@ If `CACHE_S3_BUCKET` is not set, the action falls back to the standard GitHub ca
 | `CACHE_S3_DOWNLOAD_TIMEOUT_MS`   | Per-attempt download timeout in milliseconds (default: `30000`, max: `2147483647`)                                                               |
 
 AWS credentials are resolved via the standard SDK credential chain (env vars, instance profile, etc.).
+
+### Cache scope
+
+Cache objects are stored under the ref of the workflow run, mirroring the
+[upstream cache scoping rules](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#restrictions-for-accessing-a-cache):
+
+```text
+<root>/<ref>/<version>/<key>
+```
+
+`<root>` is `CACHE_S3_PREFIX` when set, otherwise `cache/<owner>/<repo>`. `<ref>` is
+`GITHUB_REF`, for example `refs/heads/feature-a` or `refs/pull/42/merge`. The action fails when
+`GITHUB_REF` is not set.
+
+A save writes only under the current ref. A restore searches these refs in order, trying `key`
+and then each of `restore-keys` within one ref before moving to the next:
+
+1. The current ref (`GITHUB_REF`).
+1. The pull request base branch (`refs/heads/<GITHUB_BASE_REF>`), when `GITHUB_BASE_REF` is set.
+1. The default branch (`refs/heads/<default branch>`), read from `repository.default_branch` in
+   the `GITHUB_EVENT_PATH` payload, or from `CACHE_S3_DEFAULT_BRANCH` when the payload lacks it.
+
+A cache saved on `feature-a` is therefore not visible to `feature-b`, while pull requests and
+feature branches can still reuse caches from their base branch and the default branch.
+
+Every branch and pull request ref gets its own objects, so add an S3 lifecycle rule that expires
+stale caches. This example expires every cache object 7 days after it was written:
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "expire-cache-s3",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "cache/" },
+      "Expiration": { "Days": 7 }
+    }
+  ]
+}
+```
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-cache-bucket \
+  --lifecycle-configuration file://lifecycle.json
+```
+
+Adjust `Prefix` if you set `CACHE_S3_PREFIX`. An expired default branch cache costs one miss and
+is saved again by the next run on that branch.
 
 ### Compression
 

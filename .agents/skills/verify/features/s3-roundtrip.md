@@ -5,7 +5,7 @@ The primary `cache` action (`action.yml`) checks S3 for an existing cache entry 
 ## Sub-features
 
 - `roundtrip-miss` reports a cache miss without setting `cache-hit` when the key does not exist in S3 and saves `CACHE_KEY` to action state.
-- `roundtrip-save` archives the target path and uploads it to `s3://<bucket>/cache/<repo>/<version>/<key>` in the post step.
+- `roundtrip-save` archives the target path and uploads it to `s3://<bucket>/cache/<owner>/<repo>/<ref>/<version>/<key>` (the harness defaults `<ref>` to `refs/heads/main`) in the post step.
 - `roundtrip-hit` downloads and extracts the archive from S3 on an exact primary key match and sets output `cache-hit` to `"true"`.
 - `roundtrip-skip-save` skips uploading in the post step when `CACHE_RESULT` matches `CACHE_KEY`.
 

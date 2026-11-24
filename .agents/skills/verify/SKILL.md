@@ -83,7 +83,7 @@ Store all proof artifacts in `$EVIDENCE_DIR` (`/tmp/cache-s3-evidence-$RUN_ID`),
 Proof standards:
 - Exercise the real compiled `dist/*/index.js` bundles, never internal TypeScript modules or unit-test mocks.
 - Capture both the action step result (`--evidence-file "$EVIDENCE_DIR/<step>.json"`, containing `exitCode`, `inputs`, `outputs`, `states`, `stdout`, `stderr`) and the resulting side effects:
-  1. S3 bucket state via `list-objects --evidence-file "$EVIDENCE_DIR/s3-objects.json"` showing the stored object key (`cache/<owner>/<repo>/<sha256-version>/<key>`), non-zero byte size, and ETag.
+  1. S3 bucket state via `list-objects --evidence-file "$EVIDENCE_DIR/s3-objects.json"` showing the stored object key (`cache/<owner>/<repo>/<ref>/<sha256-version>/<key>`), non-zero byte size, and ETag.
   2. Filesystem verification showing that deleting the target directory and running `restore` / `restore-only` recreates the exact files, content, and symlinks on disk.
 
 ## Cleanup
