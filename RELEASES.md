@@ -35,8 +35,10 @@ the code this fork builds on.
 
 ## Changelog
 
-### Unreleased (this fork)
+### 6.3.0 (this fork)
 
+- S3 saves pass `If-None-Match: *`, so an existing cache entry is never overwritten. A
+  concurrent or duplicate save logs a skip instead of replacing the object.
 - **Breaking:** S3 cache keys are scoped by `GITHUB_REF`. Objects are stored at
   `<root>/<ref>/<version>/<key>` instead of `<root>/<version>/<key>`, where `<root>` is
   `CACHE_S3_PREFIX` or `cache/<owner>/<repo>`. Existing caches miss once after upgrading, and
